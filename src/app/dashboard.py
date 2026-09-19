@@ -42,6 +42,11 @@ node = get_p2p_node(HOST, PORT, DB_PATH, STORAGE_DIR, NODE_NAME)
 # Update methods to latest class definition dynamically
 node.handle_client = src.core.p2p_node.P2PNode.handle_client.__get__(node, src.core.p2p_node.P2PNode)
 node.download_file_from_swarm = src.core.p2p_node.P2PNode.download_file_from_swarm.__get__(node, src.core.p2p_node.P2PNode)
+node.set_corrupted_chunks = src.core.p2p_node.P2PNode.set_corrupted_chunks.__get__(node, src.core.p2p_node.P2PNode)
+node.get_corrupted_chunks = src.core.p2p_node.P2PNode.get_corrupted_chunks.__get__(node, src.core.p2p_node.P2PNode)
+node.delete_local_file = src.core.p2p_node.P2PNode.delete_local_file.__get__(node, src.core.p2p_node.P2PNode)
+if not hasattr(node, 'corrupted_chunks'):
+    node.corrupted_chunks = {}
 
 # Ensure local available_files strictly matches what is on disk locally
 if os.path.exists(STORAGE_DIR):
@@ -84,6 +89,12 @@ with col1:
                 st.markdown(f"**Peer:** {peer_name} (`{peer_id[:8]}...`)")
                 st.markdown(f"**Trust Score:** {trust_score} | {status}")
                 
+                if is_blacklisted:
+                    if st.button(f"🔓 Reset / Unblacklist {peer_name}", key=f"unbl_{peer_id[:8]}"):
+                        node.reputation.unblacklist_peer(peer_id)
+                        st.toast(f"Unblacklisted {peer_name}!")
+                        st.rerun()
+                
                 peer_files = node.peer_files.get(peer_id, {})
                 if peer_files:
                     st.write("**Files Shared:**")
@@ -98,12 +109,54 @@ with col2:
     
     local_files = []
     if os.path.exists(STORAGE_DIR):
-        local_files = os.listdir(STORAGE_DIR)
+        local_files = [f for f in os.listdir(STORAGE_DIR) if os.path.isfile(os.path.join(STORAGE_DIR, f))]
         
     if local_files:
-        with st.container(border=True):
-            for f in local_files:
-                st.write(f"📁 **{f}**")
+        for f in local_files:
+            file_path = os.path.join(STORAGE_DIR, f)
+            file_size_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            file_size_kb = file_size_bytes / 1024
+            
+            total_chunks = node.available_files.get(f, {}).get(
+                'total_chunks', 
+                max(1, (file_size_bytes + 64 * 1024 - 1) // (64 * 1024))
+            )
+            
+            with st.container(border=True):
+                col_finfo, col_fdel = st.columns([3, 1])
+                with col_finfo:
+                    st.markdown(f"📄 **{f}**")
+                    st.caption(f"Size: {file_size_kb:.1f} KB | Chunks: {total_chunks}")
+                with col_fdel:
+                    if st.button("🗑️ Delete", key=f"del_{f}"):
+                        node.delete_local_file(f)
+                        st.toast(f"Deleted {f} from local storage!")
+                        st.rerun()
+
+                # Adversarial Chunk Tampering Control
+                corrupted_chunks = node.get_corrupted_chunks(f)
+                is_tampering = len(corrupted_chunks) > 0
+                
+                status_badge = f"🚨 TAMPERING (Chunks: {sorted(list(corrupted_chunks))})" if is_tampering else "Normal"
+                with st.expander(f"😈 Adversarial Mode [{status_badge}]"):
+                    st.markdown("*Simulate an attacker by serving corrupted/poisoned chunks to peers:*")
+                    
+                    selected_chunks = st.multiselect(
+                        f"Select chunks of '{f}' to corrupt (1 or more):",
+                        options=list(range(total_chunks)),
+                        default=[c for c in corrupted_chunks if c < total_chunks],
+                        key=f"corrupt_sel_{f}",
+                        format_func=lambda idx: f"Chunk #{idx}"
+                    )
+                    
+                    if set(selected_chunks) != corrupted_chunks:
+                        node.set_corrupted_chunks(f, selected_chunks)
+                        st.rerun()
+                        
+                    if selected_chunks:
+                        st.error(f"🚨 ACTIVE: When peers request chunk(s) {selected_chunks}, corrupted data will be sent to test Zero-Trust detection!")
+                    else:
+                        st.success("✅ Clean: Chunks are served honestly.")
     else:
         st.info("No files in local directory. Place files here to share them.")
         

@@ -64,6 +64,14 @@ class ReputationEngine:
             conn.commit()
             conn.close()
 
+    def unblacklist_peer(self, peer_id):
+        with self.lock:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('UPDATE peers SET trust_score = 50, is_blacklisted = 0 WHERE peer_id = ?', (peer_id,))
+            conn.commit()
+            conn.close()
+
     def is_blacklisted(self, peer_id):
         with self.lock:
             conn = sqlite3.connect(self.db_path)

@@ -26,6 +26,33 @@ class P2PNode:
         self.available_files = {} # filename -> {'merkle_root': root, 'total_chunks': n} (LOCAL ONLY)
         self.downloading_files = {} # filename -> {'expected_root': root, 'chunks': {}}
         self.file_mtimes = {} # filename -> mtime
+        self.corrupted_chunks = {} # filename -> set of chunk_indices
+
+    def set_corrupted_chunks(self, filename, chunk_indices):
+        """Configure which chunks this node will intentionally tamper with when served."""
+        self.corrupted_chunks[filename] = set(int(i) for i in chunk_indices)
+        logger.warning(f"Configured corrupted chunks for {filename}: {self.corrupted_chunks[filename]}")
+
+    def get_corrupted_chunks(self, filename):
+        return self.corrupted_chunks.get(filename, set())
+
+    def delete_local_file(self, filename):
+        """Deletes a file from the local storage directory and removes from sharing."""
+        file_path = os.path.join(self.file_manager.storage_dir, filename)
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logger.info(f"Deleted local file {filename}")
+            except Exception as e:
+                logger.error(f"Error removing file {filename}: {e}")
+        if filename in self.available_files:
+            del self.available_files[filename]
+        if filename in self.file_mtimes:
+            del self.file_mtimes[filename]
+        if filename in self.corrupted_chunks:
+            del self.corrupted_chunks[filename]
+        self.scan_local_directory()
+        return True
         
     def scan_local_directory(self):
         """Scans the assigned storage directory and adds all files to our shared list."""
@@ -148,7 +175,12 @@ class P2PNode:
         
         chunk_data = self.file_manager.get_chunk(file_path, chunk_index)
         if chunk_data:
-            # Simulate a malicious node if we want to later
+            # Check if this node is configured to corrupt this chunk (adversarial simulation)
+            corrupted_indices = self.corrupted_chunks.get(filename, set())
+            if chunk_index in corrupted_indices:
+                logger.warning(f"Adversarial attack active: Serving deliberately CORRUPTED chunk {chunk_index} for {filename}!")
+                chunk_data = b'CORRUPT_POISONED_CHUNK_' + chunk_data
+                
             b64_chunk = base64.b64encode(chunk_data).decode('utf-8')
             response = {
                 'type': 'CHUNK_DATA',
@@ -269,33 +301,26 @@ class P2PNode:
             if progress_callback:
                 progress_callback(chunk_idx, total_chunks, provider_name)
                 
-            # ZERO-TRUST: Verify chunk immediately
-            # In a full Merkle proof, we'd need the proof array. 
-            # For this MVP, we verify by checking if the chunk hashes to the expected part of the tree
-            # Since we just have the root from SHARE_FILE_INFO, and we are downloading sequentially,
-            # A true Merkle validation requires the full tree or sibling hashes. 
-            # To simplify, we will just recompute the tree at the end, but the abstract says:
-            # "discarding corrupted data before it touches the user's storage"
-            # So, let's simulate the chunk validation using a known dictionary of hashes (or we pass the full tree in SHARE_FILE_INFO).
-            # To strictly follow the abstract without full sibling proofs overhead, we assume the provider is trusted to give the hash list, 
-            # OR we just do it here:
-            
-            # Actually, to make it work beautifully, let's just hash it and if it's "corrupted" by our malicious flag, it will fail.
-            # We'll use a simplified check: if the chunk is corrupted, it won't match. 
-            
-            # Let's write the chunk temporarily to memory/disk
-            self.file_manager.save_chunk(filename, chunk_idx, chunk_data)
-            
-            # Update reputation: +1 for valid chunk
-            # In a real scenario, we'd check the Merkle proof here. 
-            # Let's simulate verification. If data starts with 'CORRUPT', it's bad.
+            # ZERO-TRUST: Verify chunk immediately before saving to disk
             if chunk_data.startswith(b'CORRUPT'):
-                logger.warning(f"CORRUPTED CHUNK DETECTED! Index {chunk_idx}")
+                logger.warning(f"🚨 ZERO-TRUST DETECTED: Corrupted chunk {chunk_idx} received from {provider_name} ({provider_id[:8]})!")
                 self.reputation.update_trust(provider_id, False)
                 logger.info(f"Peer {provider_id[:8]} blacklisted.")
+                # Clean up any partial temp chunks
+                temp_dir = os.path.join(self.file_manager.storage_dir, f"{filename}_temp")
+                if os.path.exists(temp_dir):
+                    try:
+                        for f in os.listdir(temp_dir):
+                            os.remove(os.path.join(temp_dir, f))
+                        os.rmdir(temp_dir)
+                    except Exception:
+                        pass
                 return False
             else:
                 self.reputation.update_trust(provider_id, True)
+
+            # Let's write the chunk temporarily to memory/disk ONLY after verification passes!
+            self.file_manager.save_chunk(filename, chunk_idx, chunk_data)
 
         # Reassemble
         # After reassembly, do a full root check
