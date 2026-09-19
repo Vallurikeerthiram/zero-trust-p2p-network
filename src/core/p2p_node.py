@@ -3,6 +3,7 @@ import json
 import logging
 import base64
 import os
+import time
 from .crypto import PeerIdentity, MerkleTree
 from .reputation import ReputationEngine
 from .file_manager import FileManager
@@ -27,6 +28,7 @@ class P2PNode:
         self.downloading_files = {} # filename -> {'expected_root': root, 'chunks': {}}
         self.file_mtimes = {} # filename -> mtime
         self.corrupted_chunks = {} # filename -> set of chunk_indices
+        self.security_alerts = [] # [{'timestamp', 'reporter', 'bad_peer', 'bad_peer_id', 'filename', 'chunk_index'}]
 
     def set_corrupted_chunks(self, filename, chunk_indices):
         """Configure which chunks this node will intentionally tamper with when served."""
@@ -53,6 +55,56 @@ class P2PNode:
             del self.corrupted_chunks[filename]
         self.scan_local_directory()
         return True
+
+    async def broadcast_corruption_alert(self, filename, bad_peer_id, bad_peer_name, chunk_index):
+        """Broadcast a security alert across the swarm that bad_peer_id served a corrupted chunk for filename."""
+        alert_payload = {
+            'type': 'CORRUPTION_ALERT',
+            'sender_id': self.peer_id,
+            'sender_name': self.node_name,
+            'corrupted_peer_id': bad_peer_id,
+            'corrupted_peer_name': bad_peer_name,
+            'filename': filename,
+            'chunk_index': chunk_index,
+            'reason': f"Corrupted chunk #{chunk_index} detected during transfer"
+        }
+        
+        # Record locally
+        self.security_alerts.append({
+            'timestamp': time.strftime("%H:%M:%S"),
+            'reporter': self.node_name if self.node_name else "Me",
+            'bad_peer': bad_peer_name,
+            'bad_peer_id': bad_peer_id,
+            'filename': filename,
+            'chunk_index': chunk_index
+        })
+        
+        # Broadcast to all connected peers and registry nodes except the bad peer
+        targets = set()
+        for (host, port), peer_val in list(self.peers.items()):
+            p_id = peer_val[0] if isinstance(peer_val, tuple) else str(peer_val)
+            if p_id != bad_peer_id:
+                targets.add((host, port))
+                
+        registry_path = "swarm_registry.json"
+        if os.path.exists(registry_path):
+            try:
+                with open(registry_path, 'r') as f:
+                    reg_ports = json.load(f)
+                for rp in reg_ports:
+                    if rp != self.port:
+                        peer_tuple = self.peers.get((self.host, rp))
+                        target_id = peer_tuple[0] if isinstance(peer_tuple, tuple) else None
+                        if target_id != bad_peer_id:
+                            targets.add((self.host, rp))
+            except Exception:
+                pass
+                
+        for host, port in targets:
+            try:
+                await self._send_request(host, port, alert_payload)
+            except Exception as e:
+                logger.error(f"Failed to send CORRUPTION_ALERT to {host}:{port}: {e}")
         
     def scan_local_directory(self):
         """Scans the assigned storage directory and adds all files to our shared list."""
@@ -159,6 +211,28 @@ class P2PNode:
                     'total_chunks': message['total_chunks']
                 }
                 response = {'status': 'OK'}
+                writer.write(json.dumps(response).encode())
+                await writer.drain()
+            elif msg_type == 'CORRUPTION_ALERT':
+                bad_peer_id = message.get('corrupted_peer_id')
+                bad_peer_name = message.get('corrupted_peer_name', 'Unknown')
+                fname = message.get('filename')
+                idx = message.get('chunk_index', 0)
+                reporter = message.get('sender_name', message.get('sender_id', 'Unknown'))
+                
+                logger.warning(f"🚨 Swarm Alert from {reporter}: Peer {bad_peer_name} served corrupted chunk {idx} for {fname}!")
+                self.reputation.quarantine_provider_for_file(bad_peer_id, fname, reason=f"Reported by {reporter}", reporter_id=message.get('sender_id'))
+                
+                self.security_alerts.append({
+                    'timestamp': time.strftime("%H:%M:%S"),
+                    'reporter': reporter,
+                    'bad_peer': bad_peer_name,
+                    'bad_peer_id': bad_peer_id,
+                    'filename': fname,
+                    'chunk_index': idx
+                })
+                
+                response = {'status': 'ALERT_RECEIVED'}
                 writer.write(json.dumps(response).encode())
                 await writer.drain()
 
@@ -284,7 +358,7 @@ class P2PNode:
             ordered_providers = providers[chunk_idx % len(providers):] + providers[:chunk_idx % len(providers)]
             
             for provider_host, provider_port, provider_id, provider_name in ordered_providers:
-                if self.reputation.is_blacklisted(provider_id):
+                if self.reputation.is_blacklisted(provider_id) or self.reputation.is_provider_quarantined(provider_id, filename):
                     continue
                     
                 payload = {
@@ -307,8 +381,10 @@ class P2PNode:
                 # ZERO-TRUST: Verify chunk immediately before saving to disk
                 if chunk_data.startswith(b'CORRUPT'):
                     logger.warning(f"🚨 ZERO-TRUST DETECTED: Corrupted chunk {chunk_idx} received from {provider_name} ({provider_id[:8]})!")
-                    self.reputation.update_trust(provider_id, False)
-                    logger.info(f"Peer {provider_id[:8]} penalized and blacklisted.")
+                    # Quarantine provider specifically for this file
+                    self.reputation.quarantine_provider_for_file(provider_id, filename, reason=f"Tampered chunk #{chunk_idx}", reporter_id=self.peer_id)
+                    # Broadcast corruption alert across swarm network
+                    await self.broadcast_corruption_alert(filename, provider_id, provider_name, chunk_idx)
                     # Try next honest provider for this chunk
                     continue
                 else:

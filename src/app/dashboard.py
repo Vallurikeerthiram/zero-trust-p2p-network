@@ -10,6 +10,8 @@ from streamlit_autorefresh import st_autorefresh
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 import importlib
+import src.core.reputation
+importlib.reload(src.core.reputation)
 import src.core.p2p_node
 importlib.reload(src.core.p2p_node)
 from src.core.p2p_node import P2PNode
@@ -39,14 +41,19 @@ def get_p2p_node(host, port, db_path, storage_dir, name):
 
 node = get_p2p_node(HOST, PORT, DB_PATH, STORAGE_DIR, NODE_NAME)
 
-# Update methods to latest class definition dynamically
+# Update methods and reputation to latest definitions dynamically
+node.reputation.__class__ = src.core.reputation.ReputationEngine
+node.reputation._init_db()
 node.handle_client = src.core.p2p_node.P2PNode.handle_client.__get__(node, src.core.p2p_node.P2PNode)
 node.download_file_from_swarm = src.core.p2p_node.P2PNode.download_file_from_swarm.__get__(node, src.core.p2p_node.P2PNode)
 node.set_corrupted_chunks = src.core.p2p_node.P2PNode.set_corrupted_chunks.__get__(node, src.core.p2p_node.P2PNode)
 node.get_corrupted_chunks = src.core.p2p_node.P2PNode.get_corrupted_chunks.__get__(node, src.core.p2p_node.P2PNode)
 node.delete_local_file = src.core.p2p_node.P2PNode.delete_local_file.__get__(node, src.core.p2p_node.P2PNode)
+node.broadcast_corruption_alert = src.core.p2p_node.P2PNode.broadcast_corruption_alert.__get__(node, src.core.p2p_node.P2PNode)
 if not hasattr(node, 'corrupted_chunks'):
     node.corrupted_chunks = {}
+if not hasattr(node, 'security_alerts'):
+    node.security_alerts = []
 
 # Ensure local available_files strictly matches what is on disk locally
 if os.path.exists(STORAGE_DIR):
@@ -61,6 +68,17 @@ node.scan_local_directory()
 title_suffix = f" (Name: {NODE_NAME})" if NODE_NAME else f" (Port: {PORT})"
 st.title(f"Zero-Trust P2P Swarm Node{title_suffix}")
 st.markdown(f"**My Peer ID:** `{node.peer_id}`")
+
+# Security Alerts Banner
+if node.security_alerts:
+    with st.expander(f"🚨 Swarm Security Broadcasts ({len(node.security_alerts)} incident(s) reported)", expanded=True):
+        for alert in reversed(node.security_alerts[-5:]):
+            st.warning(
+                f"🕒 `[{alert['timestamp']}]` **Reporter:** {alert['reporter']} broadcasted that "
+                f"**{alert['bad_peer']}** (`{alert['bad_peer_id'][:8]}...`) served corrupted chunk "
+                f"**#{alert['chunk_index']}** for `📄 {alert['filename']}`. *(Provider quarantined for this file)*"
+            )
+
 st.divider()
 
 col1, col2, col3 = st.columns(3)
@@ -83,23 +101,38 @@ with col1:
                 
             trust_score = node.reputation.get_trust_score(peer_id)
             is_blacklisted = node.reputation.is_blacklisted(peer_id)
-            status = "🚨 BLACKLISTED" if is_blacklisted else "✅ TRUSTED"
+            quarantined_files = node.reputation.get_quarantined_files_for_peer(peer_id)
+            
+            if is_blacklisted:
+                status = "🚨 BLACKLISTED"
+            elif trust_score < 50:
+                status = "⚠️ CAUTION (LOW TRUST)"
+            else:
+                status = "✅ TRUSTED"
             
             with st.container(border=True):
                 st.markdown(f"**Peer:** {peer_name} (`{peer_id[:8]}...`)")
                 st.markdown(f"**Trust Score:** {trust_score} | {status}")
                 
-                if is_blacklisted:
+                if quarantined_files:
+                    st.error(f"🚫 Quarantined for: {', '.join(quarantined_files)}")
+                
+                if is_blacklisted or quarantined_files or trust_score < 50:
                     if st.button(f"🔓 Reset / Unblacklist {peer_name}", key=f"unbl_{peer_id[:8]}"):
                         node.reputation.unblacklist_peer(peer_id)
-                        st.toast(f"Unblacklisted {peer_name}!")
+                        node.reputation.unquarantine_provider(peer_id)
+                        st.toast(f"Reset status for {peer_name}!")
                         st.rerun()
                 
                 peer_files = node.peer_files.get(peer_id, {})
                 if peer_files:
                     st.write("**Files Shared:**")
                     for pf in peer_files:
-                        st.write(f"- 📄 {pf}")
+                        is_pf_quar = node.reputation.is_provider_quarantined(peer_id, pf)
+                        if is_pf_quar:
+                            st.markdown(f"- 📄 ~~{pf}~~ *(🚫 Quarantined)*")
+                        else:
+                            st.write(f"- 📄 {pf}")
                 else:
                     st.write("*No files shared*")
 
@@ -206,63 +239,90 @@ with col3:
             with st.container(border=True):
                 st.write(f"📄 **{fname}**")
                 
-                provider_names = [f"{p[3]} ({p[2][:8]})" for p in providers]
-                st.caption(f"Available from: {', '.join(provider_names)}")
+                # Separate into healthy providers and quarantined providers
+                healthy_providers = []
+                quarantined_providers = []
                 
-                if st.button(f"Pull File from Swarm", key=f"dl_{fname}"):
-                    progress_placeholder = st.empty()
-                    anim_placeholder = st.empty()
-                    
-                    def on_progress(chunk_idx, total, provider_name):
-                        progress = (chunk_idx + 1) / total
-                        progress_placeholder.progress(progress, text=f"Downloading chunk {chunk_idx+1}/{total} from {provider_name}...")
-                        
-                        # Create an animation track
-                        track_len = 20
-                        # Calculate position (0 to track_len - 1)
-                        packet_pos = min(int(progress * track_len), track_len - 1)
-                        
-                        track = ["-"] * track_len
-                        track[packet_pos] = "📦"
-                            
-                        track_str = "".join(track)
-                        
-                        # Visual graph representation
-                        anim_placeholder.markdown(f"**{provider_name}** ` {track_str} ` **Me**")
-                        
-                        # Small sleep to simulate network delay and make animation visible
-                        time.sleep(0.2)
-
-                    # Execute download
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    
-                    providers_list = [(p[0], p[1], p[2], p[3]) for p in providers]
-                    expected_root = providers[0][4]
-                    total_chunks = providers[0][5]
-                    
-                    success = False
-                    try:
-                        success = loop.run_until_complete(
-                            node.download_file_from_swarm(
-                                fname, 
-                                providers_list, 
-                                expected_root, 
-                                total_chunks,
-                                progress_callback=on_progress
-                            )
-                        )
-                    except Exception as err:
-                        st.error(f"Transfer error: {err}")
-                    finally:
-                        loop.close()
-                    
-                    if success:
-                        progress_placeholder.empty()
-                        anim_placeholder.success("✅ Transfer Complete!")
-                        st.toast(f"Successfully downloaded {fname}!")
-                        node.scan_local_directory()
-                        st.rerun()
+                for p in providers:
+                    p_host, p_port, p_id, p_name = p[0], p[1], p[2], p[3]
+                    if node.reputation.is_provider_quarantined(p_id, fname):
+                        quarantined_providers.append(p)
                     else:
-                        progress_placeholder.empty()
-                        anim_placeholder.error("❌ Transfer failed or Corrupted Data Detected!")
+                        healthy_providers.append(p)
+                
+                if healthy_providers:
+                    h_names = [f"{p[3]} ({p[2][:8]})" for p in healthy_providers]
+                    st.caption(f"✅ Available from: {', '.join(h_names)}")
+                    
+                if quarantined_providers:
+                    q_names = [f"{p[3]} ({p[2][:8]})" for p in quarantined_providers]
+                    st.caption(f"🚫 Quarantined (Tampered): {', '.join(q_names)}")
+                
+                # Check if file is completely blocked because no healthy providers remain
+                if not healthy_providers:
+                    st.error("🚨 FILE COMPLETELY BLOCKED: All providers quarantined due to corrupted chunks.")
+                else:
+                    # Note if any provider has low trust score
+                    low_trust_providers = [p for p in healthy_providers if node.reputation.get_trust_score(p[2]) < 50]
+                    if low_trust_providers:
+                        st.info(f"⚠️ Caution: Provider {low_trust_providers[0][3]} has low trust score ({node.reputation.get_trust_score(low_trust_providers[0][2])}). Strict Zero-Trust verification active.")
+                        
+                    btn_label = f"Pull File from Swarm ({len(healthy_providers)} healthy provider{'s' if len(healthy_providers)>1 else ''})"
+                    if st.button(btn_label, key=f"dl_{fname}"):
+                        progress_placeholder = st.empty()
+                        anim_placeholder = st.empty()
+                        
+                        def on_progress(chunk_idx, total, provider_name):
+                            progress = (chunk_idx + 1) / total
+                            progress_placeholder.progress(progress, text=f"Downloading chunk {chunk_idx+1}/{total} from {provider_name}...")
+                            
+                            # Create an animation track
+                            track_len = 20
+                            # Calculate position (0 to track_len - 1)
+                            packet_pos = min(int(progress * track_len), track_len - 1)
+                            
+                            track = ["-"] * track_len
+                            track[packet_pos] = "📦"
+                                
+                            track_str = "".join(track)
+                            
+                            # Visual graph representation
+                            anim_placeholder.markdown(f"**{provider_name}** ` {track_str} ` **Me**")
+                            
+                            # Small sleep to simulate network delay and make animation visible
+                            time.sleep(0.2)
+
+                        # Execute download with ONLY healthy providers
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        providers_list = [(p[0], p[1], p[2], p[3]) for p in healthy_providers]
+                        expected_root = healthy_providers[0][4]
+                        total_chunks = healthy_providers[0][5]
+                        
+                        success = False
+                        try:
+                            success = loop.run_until_complete(
+                                node.download_file_from_swarm(
+                                    fname, 
+                                    providers_list, 
+                                    expected_root, 
+                                    total_chunks,
+                                    progress_callback=on_progress
+                                )
+                            )
+                        except Exception as err:
+                            st.error(f"Transfer error: {err}")
+                        finally:
+                            loop.close()
+                        
+                        if success:
+                            progress_placeholder.empty()
+                            anim_placeholder.success("✅ Transfer Complete!")
+                            st.toast(f"Successfully downloaded {fname}!")
+                            node.scan_local_directory()
+                            st.rerun()
+                        else:
+                            progress_placeholder.empty()
+                            anim_placeholder.error("❌ Transfer failed or Corrupted Data Detected!")
+                            st.rerun()
