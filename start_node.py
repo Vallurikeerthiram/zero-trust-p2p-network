@@ -6,16 +6,34 @@ import json
 import atexit
 import argparse
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 REGISTRY_FILE = "swarm_registry.json"
 
 def get_free_port(start_port, end_port):
-    # Also read registry to avoid ports that are registered but not yet bound
     registry = []
     if os.path.exists(REGISTRY_FILE):
         with open(REGISTRY_FILE, 'r') as f:
             try: registry = json.load(f)
             except: pass
             
+    # Purge any ports from registry that are no longer listening
+    active_registry = []
+    for p in registry:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.1)
+            if s.connect_ex(('127.0.0.1', p)) == 0:
+                active_registry.append(p)
+    if active_registry != registry:
+        with open(REGISTRY_FILE, 'w') as f:
+            json.dump(active_registry, f)
+        registry = active_registry
+
     for port in range(start_port, end_port):
         if port in registry:
             continue

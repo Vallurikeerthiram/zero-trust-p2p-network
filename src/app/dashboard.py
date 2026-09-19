@@ -235,26 +235,34 @@ with col3:
 
                     # Execute download
                     loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
                     
                     providers_list = [(p[0], p[1], p[2], p[3]) for p in providers]
                     expected_root = providers[0][4]
                     total_chunks = providers[0][5]
                     
-                    success = loop.run_until_complete(
-                        node.download_file_from_swarm(
-                            fname, 
-                            providers_list, 
-                            expected_root, 
-                            total_chunks,
-                            progress_callback=on_progress
+                    success = False
+                    try:
+                        success = loop.run_until_complete(
+                            node.download_file_from_swarm(
+                                fname, 
+                                providers_list, 
+                                expected_root, 
+                                total_chunks,
+                                progress_callback=on_progress
+                            )
                         )
-                    )
+                    except Exception as err:
+                        st.error(f"Transfer error: {err}")
+                    finally:
+                        loop.close()
                     
                     if success:
                         progress_placeholder.empty()
                         anim_placeholder.success("✅ Transfer Complete!")
                         st.toast(f"Successfully downloaded {fname}!")
                         node.scan_local_directory()
+                        st.rerun()
                     else:
                         progress_placeholder.empty()
                         anim_placeholder.error("❌ Transfer failed or Corrupted Data Detected!")

@@ -278,34 +278,49 @@ class P2PNode:
             'chunks': {}
         }
         
-        # Simple round-robin download
-        success = True
         for chunk_idx in range(total_chunks):
-            provider_idx = chunk_idx % len(providers)
-            provider_host, provider_port, provider_id, provider_name = providers[provider_idx]
+            chunk_received = False
+            # Order providers starting from round-robin index
+            ordered_providers = providers[chunk_idx % len(providers):] + providers[:chunk_idx % len(providers)]
             
-            payload = {
-                'type': 'GET_CHUNK',
-                'sender_id': self.peer_id,
-                'filename': filename,
-                'chunk_index': chunk_idx
-            }
-            
-            response = await self._send_request(provider_host, provider_port, payload)
-            if not response or 'data' not in response:
-                logger.error(f"Failed to get chunk {chunk_idx}")
-                return False
+            for provider_host, provider_port, provider_id, provider_name in ordered_providers:
+                if self.reputation.is_blacklisted(provider_id):
+                    continue
+                    
+                payload = {
+                    'type': 'GET_CHUNK',
+                    'sender_id': self.peer_id,
+                    'filename': filename,
+                    'chunk_index': chunk_idx
+                }
                 
-            chunk_data = base64.b64decode(response['data'])
-            
-            if progress_callback:
-                progress_callback(chunk_idx, total_chunks, provider_name)
+                response = await self._send_request(provider_host, provider_port, payload)
+                if not response or 'data' not in response:
+                    logger.warning(f"Could not get chunk {chunk_idx} from {provider_name} ({provider_host}:{provider_port}), trying next provider...")
+                    continue
+                    
+                chunk_data = base64.b64decode(response['data'])
                 
-            # ZERO-TRUST: Verify chunk immediately before saving to disk
-            if chunk_data.startswith(b'CORRUPT'):
-                logger.warning(f"🚨 ZERO-TRUST DETECTED: Corrupted chunk {chunk_idx} received from {provider_name} ({provider_id[:8]})!")
-                self.reputation.update_trust(provider_id, False)
-                logger.info(f"Peer {provider_id[:8]} blacklisted.")
+                if progress_callback:
+                    progress_callback(chunk_idx, total_chunks, provider_name)
+                    
+                # ZERO-TRUST: Verify chunk immediately before saving to disk
+                if chunk_data.startswith(b'CORRUPT'):
+                    logger.warning(f"🚨 ZERO-TRUST DETECTED: Corrupted chunk {chunk_idx} received from {provider_name} ({provider_id[:8]})!")
+                    self.reputation.update_trust(provider_id, False)
+                    logger.info(f"Peer {provider_id[:8]} penalized and blacklisted.")
+                    # Try next honest provider for this chunk
+                    continue
+                else:
+                    self.reputation.update_trust(provider_id, True)
+
+                # Save verified chunk to temporary storage
+                self.file_manager.save_chunk(filename, chunk_idx, chunk_data)
+                chunk_received = True
+                break
+                
+            if not chunk_received:
+                logger.error(f"Failed to obtain verified chunk {chunk_idx} from any provider!")
                 # Clean up any partial temp chunks
                 temp_dir = os.path.join(self.file_manager.storage_dir, f"{filename}_temp")
                 if os.path.exists(temp_dir):
@@ -316,11 +331,6 @@ class P2PNode:
                     except Exception:
                         pass
                 return False
-            else:
-                self.reputation.update_trust(provider_id, True)
-
-            # Let's write the chunk temporarily to memory/disk ONLY after verification passes!
-            self.file_manager.save_chunk(filename, chunk_idx, chunk_data)
 
         # Reassemble
         # After reassembly, do a full root check
