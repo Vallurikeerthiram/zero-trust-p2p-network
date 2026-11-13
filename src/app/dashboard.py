@@ -12,6 +12,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.
 from src.core.p2p_node import P2PNode
 from src.discovery.stun_client import get_lan_ip
 from src.core.swarm_hub import register_node_port, unregister_node_port, get_free_port
+from src.core.device_registry import (
+    get_device_fingerprint,
+    parse_device_type,
+    get_known_device,
+    register_device
+)
 
 try:
     import qrcode
@@ -22,7 +28,10 @@ except ImportError:
 st.set_page_config(page_title="Zero-Trust P2P", layout="wide")
 
 # Refresh the UI every 2.5 seconds dynamically
-st_autorefresh(interval=2500, key="p2p_refresh")
+# Refresh UI dynamically for active nodes (prevents typing disruption on join screen)
+IS_HUB_MODE_PRE = os.environ.get("SWARM_HUB_MODE", "0").lower() in ("1", "true", "yes")
+if not (IS_HUB_MODE_PRE and "session_node" not in st.session_state):
+    st_autorefresh(interval=2500, key="p2p_refresh")
 
 PORT = int(os.environ.get("P2P_PORT", 8000))
 NODE_NAME = os.environ.get("P2P_USERNAME") or os.environ.get("NODE_NAME", "")
@@ -60,10 +69,67 @@ def get_p2p_node(host, port, db_path, storage_dir, name, advertise_host=None, en
     return node
 
 if IS_HUB_MODE:
+    # Extract Client IP, User-Agent, and Persistent Query Token
+    client_ip = getattr(st.context, "ip_address", None)
+    if not client_ip and hasattr(st, "context") and hasattr(st.context, "headers"):
+        client_ip = (
+            st.context.headers.get("x-forwarded-for", "").split(",")[0].strip()
+            or st.context.headers.get("remote-addr")
+        )
+    if not client_ip:
+        client_ip = "127.0.0.1"
+
+    user_agent = ""
+    if hasattr(st, "context") and hasattr(st.context, "headers"):
+        user_agent = st.context.headers.get("user-agent", "")
+
+    dev_token = st.query_params.get("dev", "")
+    device_key = get_device_fingerprint(client_ip, user_agent, token=dev_token)
+    known_record = get_known_device(device_key)
+    detected_dev_type = parse_device_type(user_agent)
+
+    # Auto-resume session if device is already known and user hasn't explicitly clicked switch user
+    if "session_node" not in st.session_state and known_record and not st.session_state.get("switch_user", False):
+        clean_name = known_record["username"]
+        session_port = get_free_port(8020, 8950)
+        register_node_port(session_port)
+        s_storage = f"node_data_{clean_name}"
+        os.makedirs(s_storage, exist_ok=True)
+        s_db = f"reputation_{clean_name}.db"
+
+        s_node = P2PNode(
+            host=HOST,
+            port=session_port,
+            db_path=s_db,
+            storage_dir=s_storage,
+            node_name=clean_name,
+            advertise_host=ADVERTISE_HOST,
+            enable_discovery=ENABLE_DISCOVERY,
+            tracker_url=TRACKER_URL,
+            beacon_port=BEACON_PORT
+        )
+        def run_s_node_known():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(s_node.start_server())
+        threading.Thread(target=run_s_node_known, daemon=True).start()
+
+        st.session_state["session_node"] = s_node
+        st.session_state["session_port"] = session_port
+        st.session_state["session_name"] = clean_name
+        st.session_state["session_storage"] = s_storage
+        st.session_state["device_key"] = device_key
+        st.query_params["dev"] = device_key
+        st.rerun()
+
     if "session_node" not in st.session_state:
         st.title("🛡️ Zero-Trust P2P Swarm Hub")
         st.markdown("##### Instant Encrypted File Sharing across Phones & Laptops")
-        st.info("✨ **No installation required!** Enter your name below to create your cryptographic peer identity and join the swarm.")
+
+        if known_record:
+            st.success(f"📱 Recognized Device: **{known_record['device_type']}** (`{client_ip}`) — Last used by **{known_record['username']}**")
+        else:
+            st.info(f"✨ **New Device Detected:** {detected_dev_type} (`{client_ip}`). Enter your name to join:")
 
         lan_ip = get_lan_ip()
         invite_url = f"http://{lan_ip}:{ST_SERVER_PORT}"
@@ -71,7 +137,7 @@ if IS_HUB_MODE:
         col_j1, col_j2 = st.columns([3, 2])
         with col_j1:
             with st.form("hub_join_form"):
-                default_name = NODE_NAME if (NODE_NAME and NODE_NAME != "") else ""
+                default_name = known_record["username"] if known_record else (NODE_NAME if NODE_NAME else "")
                 user_input = st.text_input("Enter your Name / Handle:", value=default_name, placeholder="e.g. Host, Keerthi, Rahul")
                 join_submitted = st.form_submit_button("🚀 Enter Network Now", type="primary", use_container_width=True)
                 if join_submitted:
@@ -99,10 +165,15 @@ if IS_HUB_MODE:
                         loop.run_until_complete(s_node.start_server())
                     threading.Thread(target=run_s_node, daemon=True).start()
 
+                    register_device(device_key, clean_name, client_ip=client_ip, user_agent=user_agent, peer_port=session_port, peer_id=s_node.peer_id)
+                    st.query_params["dev"] = device_key
+
                     st.session_state["session_node"] = s_node
                     st.session_state["session_port"] = session_port
                     st.session_state["session_name"] = clean_name
                     st.session_state["session_storage"] = s_storage
+                    st.session_state["device_key"] = device_key
+                    st.session_state.pop("switch_user", None)
                     st.rerun()
 
         with col_j2:
@@ -112,7 +183,7 @@ if IS_HUB_MODE:
                 buf = io.BytesIO()
                 qr_img.save(buf, format="PNG")
                 st.image(buf.getvalue(), width=220)
-                st.code(invite_url, language="text")
+                st.markdown(f"**Direct Link:** `{invite_url}`")
 
         st.stop()
     else:
@@ -165,6 +236,13 @@ with st.sidebar:
     st.caption(f"Full Peer ID: `{node.peer_id}`")
 
     if IS_HUB_MODE and "session_node" in st.session_state:
+        if st.button("🔄 Switch User / Identity", use_container_width=True):
+            st.session_state["switch_user"] = True
+            node.stop()
+            unregister_node_port(PORT)
+            del st.session_state["session_node"]
+            st.rerun()
+
         if st.button("🔴 Exit Network / Leave", use_container_width=True, type="secondary"):
             node.stop()
             unregister_node_port(PORT)
@@ -180,7 +258,7 @@ with st.sidebar:
             qr_img = qrcode.make(invite_url)
             buf = io.BytesIO()
             qr_img.save(buf, format="PNG")
-            st.image(buf.getvalue(), caption="Scan to join from phone or laptop", use_column_width=True)
+            st.image(buf.getvalue(), caption="Scan to join from phone or laptop", use_container_width=True)
 
 st.divider()
 
@@ -215,7 +293,28 @@ with tab_host:
         st.subheader("🖥️ Live Connected Devices & Peer Roster")
         st.caption("All phones, tablets, and computers currently active in your zero-trust swarm:")
 
-        active_peers_list = list(node.peers.items())
+        # Deduplicate peers by cryptographic peer_id (prevents duplicate loopback entries)
+        unique_host_peers = {}
+        for p_key, p_val in node.peers.items():
+            p_host = p_key[0] if isinstance(p_key, (tuple, list)) else str(p_key)
+            p_port = p_key[1] if isinstance(p_key, (tuple, list)) else 0
+            if isinstance(p_val, (tuple, list)):
+                p_id = p_val[0]
+                p_name = p_val[1] if len(p_val) > 1 and p_val[1] != "Unknown" else f"Node_{p_port}"
+            elif isinstance(p_val, dict):
+                p_id = p_val.get("peer_id", "")
+                p_name = p_val.get("username") or p_val.get("node_name") or f"Node_{p_port}"
+            else:
+                p_id = str(p_val)
+                p_name = f"Node_{p_port}"
+            if not p_id or p_id == node.peer_id:
+                continue
+            existing = unique_host_peers.get(p_id)
+            if not existing:
+                unique_host_peers[p_id] = (p_host, p_port, p_id, p_name)
+            elif existing[0] in ("127.0.0.1", "localhost") and p_host not in ("127.0.0.1", "localhost"):
+                unique_host_peers[p_id] = (p_host, p_port, p_id, p_name)
+        active_peers_list = list(unique_host_peers.values())
         if not active_peers_list:
             st.info("👋 No external devices connected yet. Friends on your Wi-Fi can scan the QR code on the right to join!")
         else:
@@ -271,13 +370,13 @@ with tab_host:
         st.subheader("📲 Invite Phones & Laptops")
         st.caption("Point any phone camera or laptop browser to this address:")
         hub_url = f"http://{lan_ip}:{ST_SERVER_PORT}"
-        st.code(hub_url, language="text")
+        st.markdown(f"**Direct Link:** `{hub_url}`")
 
         if HAS_QRCODE:
             qr_img = qrcode.make(hub_url)
             buf = io.BytesIO()
             qr_img.save(buf, format="PNG")
-            st.image(buf.getvalue(), caption="Scan with iPhone / Android Camera to Join", use_column_width=True)
+            st.image(buf.getvalue(), caption="Scan with iPhone / Android Camera to Join", use_container_width=True)
 
         st.info("💡 **Zero-Install Protocol:** Guests do not need Python or Git. They open the link, pick a username, and their device becomes an active peer instantly.")
 
@@ -363,7 +462,31 @@ with tab_peer:
 
         st.write("Peers discovered in the swarm:")
     
-        active_peers = list(node.peers.items())  # [((host, port), (peer_id, peer_name)), ...]
+        # Deduplicate peers by cryptographic peer_id (prevents duplicate loopback entries)
+        unique_col_peers = {}
+        for peer_key, peer_val in node.peers.items():
+            if isinstance(peer_key, (tuple, list)) and len(peer_key) == 2:
+                peer_host, peer_port = peer_key[0], peer_key[1]
+            else:
+                peer_host, peer_port = str(peer_key), 0
+            if isinstance(peer_val, dict):
+                p_id = str(peer_val.get('peer_id') or peer_val.get('id') or "")
+                raw_name = str(peer_val.get('username') or peer_val.get('node_name') or peer_val.get('name') or peer_val.get('sender_name') or "")
+            elif isinstance(peer_val, (tuple, list)):
+                p_id = str(peer_val[0]) if len(peer_val) > 0 else ""
+                raw_name = str(peer_val[1]) if len(peer_val) > 1 else ""
+            else:
+                p_id = str(peer_val)
+                raw_name = ""
+            if not p_id or p_id == node.peer_id:
+                continue
+            peer_name = raw_name if (raw_name and raw_name.strip() and raw_name != "Unknown") else f"Node_{peer_port}"
+            existing = unique_col_peers.get(p_id)
+            if not existing:
+                unique_col_peers[p_id] = ((peer_host, peer_port), (p_id, peer_name))
+            elif existing[0][0] in ("127.0.0.1", "localhost") and peer_host not in ("127.0.0.1", "localhost"):
+                unique_col_peers[p_id] = ((peer_host, peer_port), (p_id, peer_name))
+        active_peers = list(unique_col_peers.values())  # [((host, port), (peer_id, peer_name)), ...]
     
         if not active_peers:
             st.info("Searching for peers... (They will appear here automatically)")

@@ -96,6 +96,14 @@ def main():
         "0.0.0.0",
         "--server.headless",
         "true",
+        "--server.enableCORS",
+        "false",
+        "--server.enableXsrfProtection",
+        "false",
+        "--server.enableWebsocketCompression",
+        "false",
+        "--browser.gatherUsageStats",
+        "false",
     ]
 
     print("🚀 Launching Swarm Hub server...")
