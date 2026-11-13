@@ -3,13 +3,21 @@ import threading
 import asyncio
 import os
 import sys
-import time
 import json
+import io
 from streamlit_autorefresh import st_autorefresh
 
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from src.core.p2p_node import P2PNode
+from src.discovery.stun_client import get_lan_ip
+from src.core.swarm_hub import register_node_port, unregister_node_port, get_free_port
+
+try:
+    import qrcode
+    HAS_QRCODE = True
+except ImportError:
+    HAS_QRCODE = False
 
 st.set_page_config(page_title="Zero-Trust P2P", layout="wide")
 
@@ -25,6 +33,8 @@ ADVERTISE_HOST = os.environ.get("P2P_ADVERTISE_HOST")
 ENABLE_DISCOVERY = os.environ.get("P2P_ENABLE_DISCOVERY", os.environ.get("AUTO_DISCOVERY", "0")).lower() in ("1", "true", "yes")
 TRACKER_URL = os.environ.get("P2P_TRACKER_URL") or os.environ.get("BOOTSTRAP_TRACKER_URL")
 BEACON_PORT = int(os.environ.get("P2P_BEACON_PORT", 50050))
+IS_HUB_MODE = os.environ.get("SWARM_HUB_MODE", "0").lower() in ("1", "true", "yes")
+ST_SERVER_PORT = int(os.environ.get("STREAMLIT_PORT", "8500"))
 
 DB_PATH = f"reputation_{ident}.db"
 STORAGE_DIR = os.environ.get("STORAGE_DIR", f"node_data_{ident}")
@@ -49,13 +59,74 @@ def get_p2p_node(host, port, db_path, storage_dir, name, advertise_host=None, en
     threading.Thread(target=start_node_in_background, daemon=True).start()
     return node
 
-node = get_p2p_node(
-    HOST, PORT, DB_PATH, STORAGE_DIR, NODE_NAME,
-    advertise_host=ADVERTISE_HOST,
-    enable_discovery=ENABLE_DISCOVERY,
-    tracker_url=TRACKER_URL,
-    beacon_port=BEACON_PORT
-)
+if IS_HUB_MODE:
+    if "session_node" not in st.session_state:
+        st.title("🛡️ Zero-Trust P2P Swarm Hub")
+        st.markdown("##### Instant Encrypted File Sharing across Phones & Laptops")
+        st.info("✨ **No installation required!** Enter your name below to create your cryptographic peer identity and join the swarm.")
+
+        lan_ip = get_lan_ip()
+        invite_url = f"http://{lan_ip}:{ST_SERVER_PORT}"
+
+        col_j1, col_j2 = st.columns([3, 2])
+        with col_j1:
+            with st.form("hub_join_form"):
+                user_input = st.text_input("Enter your Name / Handle:", placeholder="e.g. Rahul, Sneha, Alex")
+                join_submitted = st.form_submit_button("🚀 Enter Network Now", type="primary", use_container_width=True)
+                if join_submitted:
+                    clean_name = user_input.strip() if user_input else f"Peer_{os.urandom(2).hex()}"
+                    session_port = get_free_port(8020, 8950)
+                    register_node_port(session_port)
+                    s_storage = f"node_data_{clean_name}"
+                    os.makedirs(s_storage, exist_ok=True)
+                    s_db = f"reputation_{clean_name}.db"
+
+                    s_node = P2PNode(
+                        host=HOST,
+                        port=session_port,
+                        db_path=s_db,
+                        storage_dir=s_storage,
+                        node_name=clean_name,
+                        advertise_host=ADVERTISE_HOST,
+                        enable_discovery=ENABLE_DISCOVERY,
+                        tracker_url=TRACKER_URL,
+                        beacon_port=BEACON_PORT
+                    )
+                    def run_s_node():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(s_node.start_server())
+                    threading.Thread(target=run_s_node, daemon=True).start()
+
+                    st.session_state["session_node"] = s_node
+                    st.session_state["session_port"] = session_port
+                    st.session_state["session_name"] = clean_name
+                    st.session_state["session_storage"] = s_storage
+                    st.rerun()
+
+        with col_j2:
+            if HAS_QRCODE:
+                st.caption("📲 **Scan with Phone to Join:**")
+                qr_img = qrcode.make(invite_url)
+                buf = io.BytesIO()
+                qr_img.save(buf, format="PNG")
+                st.image(buf.getvalue(), width=220)
+                st.code(invite_url, language="text")
+
+        st.stop()
+    else:
+        node = st.session_state["session_node"]
+        PORT = st.session_state["session_port"]
+        NODE_NAME = st.session_state["session_name"]
+        STORAGE_DIR = st.session_state["session_storage"]
+else:
+    node = get_p2p_node(
+        HOST, PORT, DB_PATH, STORAGE_DIR, NODE_NAME,
+        advertise_host=ADVERTISE_HOST,
+        enable_discovery=ENABLE_DISCOVERY,
+        tracker_url=TRACKER_URL,
+        beacon_port=BEACON_PORT
+    )
 
 # Ensure local available_files strictly matches what is on disk locally
 if os.path.exists(STORAGE_DIR):
@@ -91,6 +162,24 @@ with st.sidebar:
     st.markdown(f"**Advertised Address:** `{adv_host}:{node.port}`")
     st.markdown(f"**Peer ID:** `{node.peer_id[:8]}...`")
     st.caption(f"Full Peer ID: `{node.peer_id}`")
+
+    if IS_HUB_MODE and "session_node" in st.session_state:
+        if st.button("🔴 Exit Network / Leave", use_container_width=True, type="secondary"):
+            node.stop()
+            unregister_node_port(PORT)
+            del st.session_state["session_node"]
+            st.toast("👋 You have left the network.")
+            st.rerun()
+
+    if HAS_QRCODE:
+        with st.expander("📲 Invite Phone / Laptop", expanded=False):
+            lan_ip = get_lan_ip()
+            invite_url = f"http://{lan_ip}:{ST_SERVER_PORT}"
+            st.markdown(f"**Share link on same Wi-Fi:**\n`{invite_url}`")
+            qr_img = qrcode.make(invite_url)
+            buf = io.BytesIO()
+            qr_img.save(buf, format="PNG")
+            st.image(buf.getvalue(), caption="Scan to join from phone or laptop", use_column_width=True)
 
 st.divider()
 
@@ -255,6 +344,17 @@ with col2:
                         node.delete_local_file(f)
                         st.toast(f"Deleted {f} from local storage!")
                         st.rerun()
+                    try:
+                        with open(file_path, "rb") as fp_in:
+                            st.download_button(
+                                label="📥 Save",
+                                data=fp_in.read(),
+                                file_name=f,
+                                key=f"save_device_{f}",
+                                use_container_width=True
+                            )
+                    except Exception:
+                        pass
 
                 # Adversarial Chunk Tampering Control
                 corrupted_chunks = node.get_corrupted_chunks(f)
