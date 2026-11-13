@@ -17,16 +17,31 @@ st.set_page_config(page_title="Zero-Trust P2P", layout="wide")
 st_autorefresh(interval=2500, key="p2p_refresh")
 
 PORT = int(os.environ.get("P2P_PORT", 8000))
-NODE_NAME = os.environ.get("NODE_NAME", "")
+NODE_NAME = os.environ.get("P2P_USERNAME") or os.environ.get("NODE_NAME", "")
 ident = NODE_NAME if NODE_NAME else str(PORT)
 
-HOST = "127.0.0.1"
+HOST = os.environ.get("P2P_HOST", "127.0.0.1")
+ADVERTISE_HOST = os.environ.get("P2P_ADVERTISE_HOST")
+ENABLE_DISCOVERY = os.environ.get("P2P_ENABLE_DISCOVERY", os.environ.get("AUTO_DISCOVERY", "0")).lower() in ("1", "true", "yes")
+TRACKER_URL = os.environ.get("P2P_TRACKER_URL") or os.environ.get("BOOTSTRAP_TRACKER_URL")
+BEACON_PORT = int(os.environ.get("P2P_BEACON_PORT", 50050))
+
 DB_PATH = f"reputation_{ident}.db"
 STORAGE_DIR = os.environ.get("STORAGE_DIR", f"node_data_{ident}")
 
 @st.cache_resource
-def get_p2p_node(host, port, db_path, storage_dir, name):
-    node = P2PNode(host, port, db_path, storage_dir, name)
+def get_p2p_node(host, port, db_path, storage_dir, name, advertise_host=None, enable_discovery=False, tracker_url=None, beacon_port=50050):
+    node = P2PNode(
+        host=host,
+        port=port,
+        db_path=db_path,
+        storage_dir=storage_dir,
+        node_name=name,
+        advertise_host=advertise_host,
+        enable_discovery=enable_discovery,
+        tracker_url=tracker_url,
+        beacon_port=beacon_port
+    )
     def start_node_in_background():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -34,7 +49,13 @@ def get_p2p_node(host, port, db_path, storage_dir, name):
     threading.Thread(target=start_node_in_background, daemon=True).start()
     return node
 
-node = get_p2p_node(HOST, PORT, DB_PATH, STORAGE_DIR, NODE_NAME)
+node = get_p2p_node(
+    HOST, PORT, DB_PATH, STORAGE_DIR, NODE_NAME,
+    advertise_host=ADVERTISE_HOST,
+    enable_discovery=ENABLE_DISCOVERY,
+    tracker_url=TRACKER_URL,
+    beacon_port=BEACON_PORT
+)
 
 # Ensure local available_files strictly matches what is on disk locally
 if os.path.exists(STORAGE_DIR):
@@ -60,12 +81,88 @@ if node.security_alerts:
                 f"**#{alert['chunk_index']}** for `📄 {alert['filename']}`. *(Provider quarantined for this file)*"
             )
 
+# Sidebar Identity Display (F27)
+with st.sidebar:
+    st.header("👤 My Identity")
+    username_display = node.node_name if node.node_name else f"Node_{node.port}"
+    st.markdown(f"**Username:** {username_display}")
+    st.markdown(f"**Local Address:** `{node.host}:{node.port}`")
+    adv_host = getattr(node, 'advertised_host', node.host)
+    st.markdown(f"**Advertised Address:** `{adv_host}:{node.port}`")
+    st.markdown(f"**Peer ID:** `{node.peer_id[:8]}...`")
+    st.caption(f"Full Peer ID: `{node.peer_id}`")
+
 st.divider()
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
     st.header("🌐 1. Network")
+
+    # Display flash status notification from manual connect action
+    if "manual_connect_result" in st.session_state:
+        status_type, msg = st.session_state.pop("manual_connect_result")
+        if status_type == "success":
+            st.success(msg)
+        elif status_type == "warning":
+            st.warning(msg)
+        else:
+            st.error(msg)
+
+    # Manual Connect UI Form (F31)
+    with st.expander("🔗 Connect to Peer (Manual)", expanded=True):
+        with st.form("manual_connect_form", clear_on_submit=False):
+            c_ip, c_port = st.columns([3, 2])
+            with c_ip:
+                target_ip = st.text_input(
+                    "Peer IP / Host",
+                    value="127.0.0.1",
+                    help="Enter peer LAN or WAN IP address"
+                )
+            with c_port:
+                target_port = st.number_input(
+                    "Peer Port",
+                    min_value=1,
+                    max_value=65535,
+                    value=5001,
+                    step=1,
+                    help="Target peer listening port"
+                )
+            connect_btn = st.form_submit_button("Connect to Peer", use_container_width=True)
+
+            if connect_btn:
+                clean_ip = target_ip.strip() if target_ip else ""
+                clean_port = int(target_port)
+
+                if not clean_ip:
+                    st.warning("⚠️ Peer IP / Host cannot be empty.")
+                else:
+                    loop = getattr(node, 'loop', None)
+                    success = False
+                    message = ""
+                    with st.spinner(f"Connecting to peer at {clean_ip}:{clean_port}..."):
+                        try:
+                            if loop is not None and loop.is_running():
+                                future = asyncio.run_coroutine_threadsafe(
+                                    node.connect_to_peer(clean_ip, clean_port),
+                                    loop
+                                )
+                                success, message = future.result(timeout=10.0)
+                            else:
+                                success, message = node.connect_to_peer_sync(
+                                    clean_ip, clean_port, timeout=10.0
+                                )
+                        except Exception as err:
+                            success = False
+                            message = f"Connection error: {err}"
+
+                    if success:
+                        st.session_state["manual_connect_result"] = ("success", f"✅ {message}")
+                        st.toast(f"✅ {message}")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {message}")
+
     st.write("Peers discovered in the swarm:")
     
     active_peers = list(node.peers.items())  # [((host, port), (peer_id, peer_name)), ...]
@@ -74,11 +171,22 @@ with col1:
         st.info("Searching for peers... (They will appear here automatically)")
     else:
         for peer_key, peer_val in active_peers:
-            if isinstance(peer_val, tuple) and len(peer_val) == 2:
-                peer_id, peer_name = peer_val
+            if isinstance(peer_key, (tuple, list)) and len(peer_key) == 2:
+                peer_host, peer_port = peer_key[0], peer_key[1]
+            else:
+                peer_host, peer_port = str(peer_key), 0
+
+            if isinstance(peer_val, dict):
+                peer_id = str(peer_val.get('peer_id') or peer_val.get('id') or "")
+                raw_name = str(peer_val.get('username') or peer_val.get('node_name') or peer_val.get('name') or peer_val.get('sender_name') or "")
+            elif isinstance(peer_val, (tuple, list)):
+                peer_id = str(peer_val[0]) if len(peer_val) > 0 else ""
+                raw_name = str(peer_val[1]) if len(peer_val) > 1 else ""
             else:
                 peer_id = str(peer_val)
-                peer_name = "Unknown"
+                raw_name = ""
+
+            peer_name = raw_name if (raw_name and raw_name.strip() and raw_name != "Unknown") else f"Node_{peer_port}"
                 
             trust_score = node.reputation.get_trust_score(peer_id)
             is_blacklisted = node.reputation.is_blacklisted(peer_id)
@@ -93,6 +201,7 @@ with col1:
             
             with st.container(border=True):
                 st.markdown(f"**Peer:** {peer_name} (`{peer_id[:8]}...`)")
+                st.markdown(f"**Endpoint:** `{peer_host}:{peer_port}`")
                 st.markdown(f"**Trust Score:** {trust_score} | {status}")
                 
                 if quarantined_files:
@@ -245,11 +354,17 @@ with col3:
                         healthy_providers.append(p)
                 
                 if healthy_providers:
-                    h_names = [f"{p[3]} ({p[2][:8]})" for p in healthy_providers]
+                    h_names = []
+                    for p in healthy_providers:
+                        p_display = p[3] if (len(p) > 3 and p[3] and str(p[3]).strip() and p[3] != "Unknown") else f"Node_{p[1]}"
+                        h_names.append(f"{p_display} ({p[2][:8]})")
                     st.caption(f"✅ Available from: {', '.join(h_names)}")
                     
                 if quarantined_providers:
-                    q_names = [f"{p[3]} ({p[2][:8]})" for p in quarantined_providers]
+                    q_names = []
+                    for p in quarantined_providers:
+                        p_display = p[3] if (len(p) > 3 and p[3] and str(p[3]).strip() and p[3] != "Unknown") else f"Node_{p[1]}"
+                        q_names.append(f"{p_display} ({p[2][:8]})")
                     st.caption(f"🚫 Quarantined (Tampered): {', '.join(q_names)}")
                 
                 # Check if file is completely blocked because no healthy providers remain
@@ -259,7 +374,9 @@ with col3:
                     # Note if any provider has low trust score
                     low_trust_providers = [p for p in healthy_providers if node.reputation.get_trust_score(p[2]) < 50]
                     if low_trust_providers:
-                        st.info(f"⚠️ Caution: Provider {low_trust_providers[0][3]} has low trust score ({node.reputation.get_trust_score(low_trust_providers[0][2])}). Strict Zero-Trust verification active.")
+                        lt = low_trust_providers[0]
+                        lt_name = lt[3] if (len(lt) > 3 and lt[3] and str(lt[3]).strip() and lt[3] != "Unknown") else f"Node_{lt[1]}"
+                        st.info(f"⚠️ Caution: Provider {lt_name} has low trust score ({node.reputation.get_trust_score(lt[2])}). Strict Zero-Trust verification active.")
                         
                     btn_label = f"Pull File from Swarm ({len(healthy_providers)} healthy provider{'s' if len(healthy_providers)>1 else ''})"
                     if st.button(btn_label, key=f"dl_{swarm_key}"):

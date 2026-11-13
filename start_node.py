@@ -80,23 +80,64 @@ def unregister_node(port):
 def main():
     parser = argparse.ArgumentParser(description="Start a Zero-Trust P2P Node")
     parser.add_argument("name", nargs="?", default="", help="Optional name for the node (e.g. 'a', 'b', 'alice')")
+    parser.add_argument("-u", "--username", default=None, help="Username for the node (e.g. 'Alice')")
+    parser.add_argument("--host", default="0.0.0.0", help="Host address to bind to (default: 0.0.0.0)")
+    parser.add_argument("--advertise-host", default=None, help="Reachable LAN/WAN IP address to advertise to peers")
+    parser.add_argument(
+        "-d",
+        "--enable-discovery",
+        action="store_true",
+        default=False,
+        help="Enable dual-mode hybrid discovery (LAN UDP broadcast beacon & WAN bootstrap tracker)"
+    )
+    parser.add_argument(
+        "--tracker-url",
+        default=None,
+        help="HTTP Bootstrap tracker URL for WAN discovery (e.g. http://127.0.0.1:9000)"
+    )
+    parser.add_argument(
+        "--beacon-port",
+        type=int,
+        default=50050,
+        help="UDP broadcast port for LAN auto-discovery beacons (default: 50050)"
+    )
     args = parser.parse_args()
 
-    node_name = args.name
-    print(f"Initializing Zero-Trust P2P Node {f'({node_name})' if node_name else ''}...")
-    
     p2p_port = get_free_port(8000, 8100)
     register_node(p2p_port) # Register immediately to prevent race conditions
     st_port = get_free_port(8500, 8600)
     
     atexit.register(unregister_node, p2p_port)
+
+    # Resolve username: --username > positional name > interactive prompt > default
+    username = args.username or args.name
+    if not username and sys.stdin and sys.stdin.isatty():
+        try:
+            prompt_val = input(f"Enter username [Node_{p2p_port}]: ").strip()
+            if prompt_val:
+                username = prompt_val
+        except (EOFError, KeyboardInterrupt):
+            pass
+    if not username:
+        username = f"Node_{p2p_port}"
+    node_name = username
+
+    print(f"Initializing Zero-Trust P2P Node ({node_name})...")
     
     ident = node_name if node_name else str(p2p_port)
     storage_dir = f"node_data_{ident}"
     if not os.path.exists(storage_dir):
         os.makedirs(storage_dir)
         
-    print(f"✅ Auto-assigned P2P Port: {p2p_port}")
+    print(f"✅ Auto-assigned P2P Port: {p2p_port} (Bind: {args.host})")
+    if args.advertise_host:
+        print(f"🌐 Advertised Host: {args.advertise_host}")
+    if args.enable_discovery:
+        print(f"📡 Hybrid Discovery: ENABLED (Beacon Port: {args.beacon_port})")
+        if args.tracker_url:
+            print(f"🌐 Bootstrap Tracker: {args.tracker_url}")
+    else:
+        print(f"📡 Hybrid Discovery: DISABLED (Use --enable-discovery to activate)")
     print(f"✅ Auto-assigned Dashboard Port: {st_port}")
     print(f"📁 Local Storage Directory: {storage_dir}/")
     print(f"🔗 Joining swarm automatically...")
@@ -107,10 +148,25 @@ def main():
     env = os.environ.copy()
     env["P2P_PORT"] = str(p2p_port)
     env["NODE_NAME"] = node_name
+    env["P2P_USERNAME"] = node_name
+    env["P2P_HOST"] = args.host
+    if args.advertise_host:
+        env["P2P_ADVERTISE_HOST"] = args.advertise_host
     env["STORAGE_DIR"] = storage_dir
-    env["AUTO_DISCOVERY"] = "1"
+    env["AUTO_DISCOVERY"] = "1" if args.enable_discovery else "0"
+    env["P2P_ENABLE_DISCOVERY"] = "1" if args.enable_discovery else "0"
+    if args.tracker_url:
+        env["P2P_TRACKER_URL"] = args.tracker_url
+        env["BOOTSTRAP_TRACKER_URL"] = args.tracker_url
+    if args.beacon_port:
+        env["P2P_BEACON_PORT"] = str(args.beacon_port)
     
-    cmd = [sys.executable, "-m", "streamlit", "run", dashboard_path, "--server.port", str(st_port)]
+    cmd = [
+        sys.executable, "-m", "streamlit", "run", dashboard_path,
+        "--server.port", str(st_port),
+        "--server.address", args.host,
+        "--server.headless", "true"
+    ]
     
     try:
         subprocess.run(cmd, env=env)

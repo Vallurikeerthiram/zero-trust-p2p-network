@@ -199,3 +199,16 @@ def node_factory(isolated_dir):
         return node
 
     yield _create
+
+
+@pytest.fixture(autouse=True)
+def guard_offline_stun(monkeypatch):
+    """Ensure NO test queries live Google STUN servers over the internet."""
+    try:
+        monkeypatch.setattr(
+            "src.discovery.stun_client.PUBLIC_STUN_SERVERS",
+            [("127.0.0.1", 19302), ("127.0.0.1", 19303)],
+        )
+    except Exception:
+        pass
+

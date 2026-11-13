@@ -142,14 +142,47 @@ def is_envelope(data: Any) -> bool:
     return all(k in data for k in required_keys)
 
 class P2PNode:
-    def __init__(self, host, port, db_path="reputation.db", storage_dir="storage", node_name=""):
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8000,
+        db_path: str = "reputation.db",
+        storage_dir: str = "storage",
+        node_name: str = "",
+        advertise_host: Optional[str] = None,
+        enable_discovery: bool = False,
+        tracker_url: Optional[str] = None,
+        beacon_port: int = 50050
+    ):
         self.host = host
         self.port = port
-        self.node_name = node_name
+        self.node_name = node_name if node_name else f"Node_{port}"
         self.identity = PeerIdentity(node_name if node_name else str(port))
         self.peer_id = self.identity.get_peer_id()
         self.reputation = ReputationEngine(db_path)
         self.file_manager = FileManager(storage_dir)
+
+        # Dual-address networking & host advertising
+        if advertise_host:
+            self.advertised_host = advertise_host
+        elif self.host in ("0.0.0.0", "", "::"):
+            try:
+                from src.discovery.stun_client import get_lan_ip
+                self.advertised_host = get_lan_ip()
+            except Exception:
+                self.advertised_host = "127.0.0.1"
+        else:
+            self.advertised_host = self.host
+
+        # Discovery Lifecycle Configuration
+        self.enable_discovery = enable_discovery
+        self.tracker_url = tracker_url
+        self.beacon_port = int(beacon_port) if beacon_port is not None else 50050
+        self.lan_beacon = None
+        self.tracker_client = None
+        self._server = None
+        self._auto_sync_task = None
+        self._stopping = False
         
         # Local state
         self.peers = {} # (host, port) -> (peer_id, peer_name)
@@ -344,12 +377,13 @@ class P2PNode:
             try:
                 with open(registry_path, 'r') as f:
                     reg_ports = json.load(f)
+                reg_host = "127.0.0.1" if self.host in ("0.0.0.0", "", "::") else self.host
                 for rp in reg_ports:
                     if rp != self.port:
-                        peer_tuple = self.peers.get((self.host, rp))
+                        peer_tuple = self.peers.get((reg_host, rp))
                         target_id = peer_tuple[0] if isinstance(peer_tuple, tuple) else None
                         if target_id != bad_peer_id and (target_id is None or not self.reputation.is_blacklisted(target_id)):
-                            targets.add((self.host, rp))
+                            targets.add((reg_host, rp))
             except Exception:
                 pass
                 
@@ -580,28 +614,30 @@ class P2PNode:
                         self.peer_files.pop(p_id, None)
 
                 registry_path = "swarm_registry.json"
-                ports_to_ping = set()
+                targets_to_ping = set()
+                local_host = "127.0.0.1" if self.host in ("0.0.0.0", "", "::") else self.host
                 if os.path.exists(registry_path):
                     try:
                         with open(registry_path, 'r') as f:
                             peers = json.load(f)
                         for p in peers:
                             if p != self.port:
-                                ports_to_ping.add(p)
+                                targets_to_ping.add((local_host, p))
                     except Exception:
                         pass
                 for (h, p) in list(self.peers.keys()):
-                    if p != self.port:
-                        ports_to_ping.add(p)
+                    if (p == self.port) and (h in ("127.0.0.1", "localhost", self.host, getattr(self, "advertised_host", None))):
+                        continue
+                    targets_to_ping.add((h, p))
                         
                 tasks_to_ping = []
-                for p in ports_to_ping:
-                    peer_entry = self.peers.get((self.host, p))
+                for (h, p) in targets_to_ping:
+                    peer_entry = self.peers.get((h, p))
                     if peer_entry:
                         p_id = peer_entry[0] if isinstance(peer_entry, tuple) else peer_entry
                         if self.reputation.is_blacklisted(p_id):
                             continue
-                    tasks_to_ping.append(self.ping_peer(self.host, p))
+                    tasks_to_ping.append(self.ping_peer(h, p))
                 if tasks_to_ping:
                     await asyncio.gather(*tasks_to_ping, return_exceptions=True)
             except Exception as loop_err:
@@ -612,11 +648,101 @@ class P2PNode:
     async def start_server(self):
         self.loop = asyncio.get_running_loop()
         self.scan_local_directory()
-        asyncio.create_task(self.auto_sync_loop())
+        self._auto_sync_task = asyncio.create_task(self.auto_sync_loop())
+
+        # Milestone 7: Start Auto-Discovery Daemons when enabled
+        if self.enable_discovery:
+            try:
+                from src.discovery.lan_beacon import LanBeacon
+                self.lan_beacon = LanBeacon(
+                    node=self,
+                    broadcast_port=getattr(self, 'beacon_port', 50050),
+                    loop=self.loop
+                )
+                self.lan_beacon.start()
+                logger.info(f"LanBeacon started on UDP port {getattr(self, 'beacon_port', 50050)}")
+            except Exception as e:
+                logger.error(f"Failed to start LanBeacon: {e}")
+
+            if getattr(self, 'tracker_url', None):
+                try:
+                    from src.discovery.tracker_client import TrackerClient
+                    self.tracker_client = TrackerClient(
+                        node=self,
+                        tracker_url=self.tracker_url,
+                        loop=self.loop
+                    )
+                    self.tracker_client.start()
+                    logger.info(f"TrackerClient started targeting {self.tracker_url}")
+                except Exception as e:
+                    logger.error(f"Failed to start TrackerClient: {e}")
+
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
+        self._server = server
         logger.info(f"Node started on {self.host}:{self.port} - ID: {self.peer_id[:8]}...")
-        async with server:
-            await server.serve_forever()
+        try:
+            async with server:
+                await server.serve_forever()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self.stop()
+
+    def stop(self):
+        """
+        Gracefully shut down all node components and discovery daemons.
+        Synchronous, idempotent, thread-safe, and safe to call from atexit or tests.
+        """
+        if getattr(self, '_stopping', False):
+            return
+        self._stopping = True
+        try:
+            # 1. Stop LAN Beacon daemon and close UDP sockets
+            if hasattr(self, 'lan_beacon') and self.lan_beacon is not None:
+                try:
+                    self.lan_beacon.stop()
+                except Exception as e:
+                    logger.warning(f"Error stopping LanBeacon: {e}")
+                self.lan_beacon = None
+
+            # 2. Stop Tracker Client daemon, unregister, and cancel polling
+            if hasattr(self, 'tracker_client') and self.tracker_client is not None:
+                try:
+                    self.tracker_client.stop()
+                except Exception as e:
+                    logger.warning(f"Error stopping TrackerClient: {e}")
+                self.tracker_client = None
+
+            # 3. Cancel background auto_sync_loop task
+            if hasattr(self, '_auto_sync_task') and self._auto_sync_task is not None:
+                try:
+                    if not self._auto_sync_task.done():
+                        self._auto_sync_task.cancel()
+                except Exception as e:
+                    logger.warning(f"Error cancelling auto_sync_task: {e}")
+                self._auto_sync_task = None
+
+            # 4. Close TCP server listening socket
+            if hasattr(self, '_server') and self._server is not None:
+                try:
+                    self._server.close()
+                except Exception as e:
+                    logger.warning(f"Error closing TCP server: {e}")
+                self._server = None
+        finally:
+            self._stopping = False
+
+    async def stop_async(self):
+        """
+        Asynchronous shutdown helper that invokes stop() and awaits server.wait_closed().
+        """
+        server = getattr(self, '_server', None)
+        self.stop()
+        if server is not None:
+            try:
+                await server.wait_closed()
+            except Exception:
+                pass
 
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
@@ -644,9 +770,16 @@ class P2PNode:
                     await send_frame(writer, resp_envelope)
 
                 if msg_type == 'PING':
+                    if sender_id == self.peer_id:
+                        logger.warning(f"Ignoring PING from self (sender_id={sender_id[:8]})")
+                        return
                     if 'host' in msg_payload and 'port' in msg_payload:
+                        peer_host = msg_payload['host']
+                        if not peer_host or peer_host in ("0.0.0.0", "::"):
+                            peer_host = addr[0] if (addr and len(addr) > 0) else "127.0.0.1"
+                        peer_port = int(msg_payload['port'])
                         sender_name = msg_payload.get('sender_name', 'Unknown')
-                        self.peers[(msg_payload['host'], msg_payload['port'])] = (sender_id, sender_name)
+                        self.peers[(peer_host, peer_port)] = (sender_id, sender_name)
                         self.reputation.add_peer(sender_id)
                         if 'files' in msg_payload:
                             self.peer_files[sender_id] = msg_payload['files']
@@ -655,6 +788,8 @@ class P2PNode:
                         'type': 'PONG',
                         'sender_id': self.peer_id,
                         'sender_name': self.node_name,
+                        'host': self.advertised_host,
+                        'port': self.port,
                         'files': self.available_files
                     }
                     await send_response(response)
@@ -663,6 +798,15 @@ class P2PNode:
                     await self.handle_get_chunk(msg_payload, writer, sender_id=sender_id, send_response=send_response)
 
                 elif msg_type == 'SHARE_FILE_INFO':
+                    if 'host' in msg_payload and 'port' in msg_payload:
+                        peer_host = msg_payload['host']
+                        if not peer_host or peer_host in ("0.0.0.0", "::"):
+                            peer_host = addr[0] if (addr and len(addr) > 0) else "127.0.0.1"
+                        peer_port = int(msg_payload['port'])
+                        sender_name = msg_payload.get('sender_name', 'Unknown')
+                        self.peers[(peer_host, peer_port)] = (sender_id, sender_name)
+                        self.reputation.add_peer(sender_id)
+
                     raw_filename = msg_payload.get('filename')
                     try:
                         clean_filename = self.file_manager.validate_filename(raw_filename)
@@ -901,7 +1045,7 @@ class P2PNode:
             'type': 'PING', 
             'sender_id': self.peer_id,
             'sender_name': self.node_name,
-            'host': self.host,
+            'host': self.advertised_host,
             'port': self.port,
             'files': self.available_files
         }
@@ -911,6 +1055,10 @@ class P2PNode:
             # 2. Post-check: Validate returned peer_id
             if not peer_id or not isinstance(peer_id, str) or not peer_id.strip():
                 logger.warning(f"Received PONG lacking valid sender_id from {host}:{port}. Rejecting.")
+                return False
+
+            if peer_id == self.peer_id:
+                logger.warning(f"Rejecting connection to self (peer_id match) from {host}:{port}")
                 return False
 
             if self.reputation.is_blacklisted(peer_id):
@@ -934,6 +1082,94 @@ class P2PNode:
                 if dead_peer_id in self.peer_files:
                     del self.peer_files[dead_peer_id]
             return False
+
+    async def connect_to_peer(self, host: str, port: int, timeout: float = 5.0, force: bool = False) -> Tuple[bool, str]:
+        """
+        Public API to initiate an authenticated connection and handshake with a remote peer (F31).
+        Validates coordinates, guards against self-connections and blacklisted peers,
+        exchanges cryptographic PING/PONG, and registers the peer in local state.
+        Returns (success: bool, message: str).
+        """
+        if not host or not isinstance(host, str) or not host.strip():
+            return False, "Invalid host"
+        host = host.strip()
+
+        # Port validation hardening
+        if isinstance(port, bool):
+            return False, f"Invalid port: {port}"
+        if not isinstance(port, (int, str)):
+            return False, f"Invalid port: {port}"
+        if isinstance(port, str):
+            if not port.strip().isdigit():
+                return False, f"Invalid port: {port}"
+            port = int(port.strip())
+        else:
+            port = int(port)
+
+        if not (1 <= port <= 65535):
+            return False, f"Invalid port: {port}. Port must be between 1 and 65535."
+
+        # Self-connection guard hardening
+        host_norm = host.lower()
+        local_hosts = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+        if getattr(self, "host", None):
+            local_hosts.add(self.host.lower())
+        adv_host = getattr(self, "advertised_host", None)
+        if adv_host:
+            local_hosts.add(adv_host.lower())
+
+        is_local = (host_norm in local_hosts) or host_norm.startswith("127.")
+        if is_local and port == self.port:
+            return False, "Cannot connect to self"
+
+        # Check reputation: if known peer at (host, port) is blacklisted
+        peer_entry = self.peers.get((host, port))
+        if peer_entry:
+            peer_id = peer_entry[0] if isinstance(peer_entry, tuple) else peer_entry
+            if self.reputation.is_blacklisted(peer_id):
+                return False, "Peer is blacklisted"
+            if not force:
+                return True, f"Already connected to {host}:{port}"
+
+        # Handshake
+        try:
+            success = await asyncio.wait_for(self.ping_peer(host, port), timeout=timeout)
+            if success and (host, port) in self.peers:
+                return True, f"Connected to {host}:{port}"
+            else:
+                return False, "Connection failed or peer rejected handshake"
+        except asyncio.TimeoutError:
+            return False, f"Connection to {host}:{port} timed out after {timeout}s"
+        except Exception as e:
+            return False, f"Connection error: {e}"
+
+    def connect_to_peer_sync(self, host: str, port: int, timeout: float = 5.0) -> Tuple[bool, str]:
+        """
+        Synchronous, thread-safe wrapper to connect to a peer from UI or external threads (F31).
+        Dispatches connect_to_peer onto the node's running asyncio event loop.
+        Guards against thread deadlock when invoked from the event loop thread.
+        Returns (success: bool, message: str).
+        """
+        loop = getattr(self, 'loop', None)
+        try:
+            current_loop = asyncio.get_running_loop()
+            if current_loop is loop:
+                return False, "Cannot call connect_to_peer_sync from the event loop thread"
+            return False, "Cannot call connect_to_peer_sync from an event loop thread"
+        except RuntimeError:
+            pass
+
+        if loop is None or not loop.is_running():
+            return False, "Node event loop is not active"
+
+        import concurrent.futures
+        try:
+            future = asyncio.run_coroutine_threadsafe(self.connect_to_peer(host, port, timeout=timeout), loop)
+            return future.result(timeout=timeout)
+        except (TimeoutError, concurrent.futures.TimeoutError):
+            return False, f"Connection to {host}:{port} timed out after {timeout}s"
+        except Exception as e:
+            return False, f"Connection error: {e}"
 
     async def broadcast_file(self, file_path: str) -> str:
         """
@@ -965,12 +1201,13 @@ class P2PNode:
         payload = {
             'type': 'SHARE_FILE_INFO',
             'sender_id': self.peer_id,
+            'sender_name': self.node_name,
             'filename': filename,
             'file_size': file_size,
             'merkle_root': tree.root,
             'file_id': tree.root,
             'total_chunks': len(chunks),
-            'host': self.host,
+            'host': self.advertised_host,
             'port': self.port
         }
         
