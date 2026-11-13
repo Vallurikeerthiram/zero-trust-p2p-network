@@ -8,10 +8,18 @@ class ReputationEngine:
         self.lock = threading.Lock()
         self._init_db()
 
+    def _get_connection(self):
+        """Returns a SQLite connection with 30s busy timeout and thread-safe locking."""
+        return sqlite3.connect(self.db_path, timeout=30.0)
+
     def _init_db(self):
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             cursor = conn.cursor()
+            try:
+                cursor.execute('PRAGMA journal_mode=WAL;')
+            except Exception:
+                pass
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS peers (
                     peer_id TEXT PRIMARY KEY,
@@ -33,8 +41,10 @@ class ReputationEngine:
             conn.close()
 
     def add_peer(self, peer_id):
+        if not peer_id or not isinstance(peer_id, str) or not peer_id.strip():
+            return
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute('INSERT OR IGNORE INTO peers (peer_id, trust_score, is_blacklisted) VALUES (?, 50, 0)', (peer_id,))
             conn.commit()
@@ -43,11 +53,14 @@ class ReputationEngine:
     def update_trust(self, peer_id, is_valid_chunk):
         """
         Update the trust score based on chunk validity.
-        If a chunk is valid, we increase trust slightly.
-        If a chunk is invalid (content poisoning), we penalize heavily (-25).
+        Reward: +2 (max 100)
+        Penalty: -25 (min 0)
+        Blacklist at 0.
         """
+        if not peer_id or not isinstance(peer_id, str) or not peer_id.strip():
+            return
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             cursor = conn.cursor()
             
             cursor.execute('SELECT trust_score, is_blacklisted FROM peers WHERE peer_id = ?', (peer_id,))
@@ -76,9 +89,13 @@ class ReputationEngine:
             conn.close()
 
     def quarantine_provider_for_file(self, peer_id, filename, reason="Corrupted chunk detected", reporter_id="local"):
-        """Quarantine a provider specifically for a given file and penalize trust score."""
+        """Quarantine a provider specifically for a given file and penalize trust score (-25). Preserves blacklist state."""
+        if not peer_id or not isinstance(peer_id, str) or not peer_id.strip():
+            return 0
+        if not filename or not isinstance(filename, str):
+            return 0
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute('INSERT OR IGNORE INTO peers (peer_id, trust_score, is_blacklisted) VALUES (?, 50, 0)', (peer_id,))
             cursor.execute('''
@@ -86,12 +103,16 @@ class ReputationEngine:
                 VALUES (?, ?, ?, ?)
             ''', (peer_id, filename, reason, reporter_id))
             
-            # Penalize peer's trust score (-25)
-            cursor.execute('SELECT trust_score FROM peers WHERE peer_id = ?', (peer_id,))
+            # Penalize peer's trust score (-25), preserving blacklist state
+            cursor.execute('SELECT trust_score, is_blacklisted FROM peers WHERE peer_id = ?', (peer_id,))
             row = cursor.fetchone()
-            current_score = row[0] if row else 50
+            if row:
+                current_score, was_blacklisted = row[0], bool(row[1])
+            else:
+                current_score, was_blacklisted = 50, False
+
             new_score = max(0, current_score - 25)
-            new_blacklisted = 1 if new_score == 0 else 0
+            new_blacklisted = 1 if (new_score == 0 or was_blacklisted) else 0
             cursor.execute('UPDATE peers SET trust_score = ?, is_blacklisted = ? WHERE peer_id = ?', (new_score, new_blacklisted, peer_id))
             
             conn.commit()
@@ -100,8 +121,10 @@ class ReputationEngine:
 
     def is_provider_quarantined(self, peer_id, filename):
         """Check if a specific peer is quarantined as a provider for a file."""
+        if not peer_id or not filename:
+            return False
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute('SELECT 1 FROM file_quarantine WHERE peer_id = ? AND filename = ?', (peer_id, filename))
             row = cursor.fetchone()
@@ -110,8 +133,10 @@ class ReputationEngine:
 
     def get_quarantined_files_for_peer(self, peer_id):
         """Get all filenames for which this peer is quarantined."""
+        if not peer_id:
+            return []
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute('SELECT filename FROM file_quarantine WHERE peer_id = ?', (peer_id,))
             rows = cursor.fetchall()
@@ -120,8 +145,10 @@ class ReputationEngine:
 
     def unquarantine_provider(self, peer_id, filename=None):
         """Lift quarantine for a peer on a file (or all files)."""
+        if not peer_id:
+            return
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             cursor = conn.cursor()
             if filename:
                 cursor.execute('DELETE FROM file_quarantine WHERE peer_id = ? AND filename = ?', (peer_id, filename))
@@ -131,16 +158,24 @@ class ReputationEngine:
             conn.close()
 
     def unblacklist_peer(self, peer_id):
+        if not peer_id:
+            return
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute('UPDATE peers SET trust_score = 50, is_blacklisted = 0 WHERE peer_id = ?', (peer_id,))
             conn.commit()
             conn.close()
 
     def is_blacklisted(self, peer_id):
+        """
+        Check if peer is blacklisted.
+        Zero-trust fail-secure: missing, null, empty or invalid peer_id returns True (BLOCKED).
+        """
+        if not peer_id or not isinstance(peer_id, str) or not peer_id.strip():
+            return True
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute('SELECT is_blacklisted FROM peers WHERE peer_id = ?', (peer_id,))
             row = cursor.fetchone()
@@ -148,8 +183,10 @@ class ReputationEngine:
             return bool(row[0]) if row else False
 
     def get_trust_score(self, peer_id):
+        if not peer_id or not isinstance(peer_id, str) or not peer_id.strip():
+            return 0
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute('SELECT trust_score FROM peers WHERE peer_id = ?', (peer_id,))
             row = cursor.fetchone()
@@ -158,7 +195,7 @@ class ReputationEngine:
             
     def get_all_peers(self):
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute('SELECT peer_id, trust_score, is_blacklisted FROM peers')
             rows = cursor.fetchall()

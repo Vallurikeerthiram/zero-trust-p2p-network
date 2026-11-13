@@ -15,57 +15,67 @@ if sys.platform == "win32":
 
 REGISTRY_FILE = "swarm_registry.json"
 
+def _safe_read_registry():
+    if not os.path.exists(REGISTRY_FILE):
+        return []
+    for _ in range(5):
+        try:
+            with open(REGISTRY_FILE, 'r') as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except Exception:
+            import time; time.sleep(0.05)
+    return []
+
+def _safe_write_registry(nodes):
+    for _ in range(5):
+        try:
+            with open(REGISTRY_FILE, 'w') as f:
+                json.dump(nodes, f)
+            return True
+        except Exception:
+            import time; time.sleep(0.05)
+    return False
+
 def get_free_port(start_port, end_port):
-    registry = []
-    if os.path.exists(REGISTRY_FILE):
-        with open(REGISTRY_FILE, 'r') as f:
-            try: registry = json.load(f)
-            except: pass
+    registry = _safe_read_registry()
             
     # Purge any ports from registry that are no longer listening
     active_registry = []
     for p in registry:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.1)
-            if s.connect_ex(('127.0.0.1', p)) == 0:
-                active_registry.append(p)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.1)
+                if s.connect_ex(('127.0.0.1', p)) == 0:
+                    active_registry.append(p)
+        except Exception:
+            pass
     if active_registry != registry:
-        with open(REGISTRY_FILE, 'w') as f:
-            json.dump(active_registry, f)
+        _safe_write_registry(active_registry)
         registry = active_registry
 
     for port in range(start_port, end_port):
         if port in registry:
             continue
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(('127.0.0.1', port)) != 0:
-                return port
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(('127.0.0.1', port)) != 0:
+                    return port
+        except Exception:
+            continue
     raise Exception("No free ports available in range.")
 
 def register_node(port):
-    nodes = []
-    if os.path.exists(REGISTRY_FILE):
-        with open(REGISTRY_FILE, 'r') as f:
-            try:
-                nodes = json.load(f)
-            except json.JSONDecodeError:
-                pass
+    nodes = _safe_read_registry()
     if port not in nodes:
         nodes.append(port)
-    with open(REGISTRY_FILE, 'w') as f:
-        json.dump(nodes, f)
+    _safe_write_registry(nodes)
 
 def unregister_node(port):
-    if os.path.exists(REGISTRY_FILE):
-        with open(REGISTRY_FILE, 'r') as f:
-            try:
-                nodes = json.load(f)
-            except json.JSONDecodeError:
-                return
-        if port in nodes:
-            nodes.remove(port)
-            with open(REGISTRY_FILE, 'w') as f:
-                json.dump(nodes, f)
+    nodes = _safe_read_registry()
+    if port in nodes:
+        nodes.remove(port)
+        _safe_write_registry(nodes)
 
 def main():
     parser = argparse.ArgumentParser(description="Start a Zero-Trust P2P Node")

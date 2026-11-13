@@ -18,6 +18,10 @@ reputation_*.db
 private_key_*.pem
 swarm_registry.json
 
+# Testing & Agents
+.pytest_cache/
+.agents/
+
 # Operating System Files
 .DS_Store
 Thumbs.db
