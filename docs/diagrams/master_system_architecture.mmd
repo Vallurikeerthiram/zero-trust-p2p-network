@@ -1,0 +1,59 @@
+flowchart LR
+    %% Zone 1: Client Devices
+    subgraph ZONE1 ["1. Client Devices (Any Phone or PC)"]
+        Phone["📱 Smartphone / Tablet<br><b>Instant Web Access</b><br>(QR Code Scan • Zero-Install)"]
+        Laptop["💻 Laptop / PC Workstation<br><b>Web Hub or Native Daemon</b><br>(Browser UI / Python CLI)"]
+    end
+
+    %% Zone 2: Discovery & Network
+    subgraph ZONE2 ["2. Network & Discovery Mesh"]
+        Beacon["📡 Wi-Fi Auto-Discovery<br><b>UDP Port 50050 Beacons</b><br>(Finds local peers in < 1 sec)"]
+        WAN["🌐 Internet Rendezvous / STUN<br><b>NAT Traversal (RFC 5389)</b><br>(Connects peers across networks)"]
+    end
+
+    %% Zone 3: Core Zero-Trust Node Engine
+    subgraph ZONE3 ["3. Zero-Trust Peer Node Engine"]
+        Gateway["🌐 Swarm Web Gateway<br><b>Streamlit / HTTP / WebSocket</b><br>(Port 8500 Web Interface)"]
+        WireFramer["⚡ Wire Protocol Framer<br><b>TCP Stream Parser</b><br>(4-Byte Length Prefix • 16MB Cap)"]
+        
+        subgraph SECURITY ["In-Memory Security Core"]
+            Crypto["🔐 Identity & Crypto Signer<br><b>RSA-PSS 2048-bit Keypair</b><br>(Signed Envelopes • 60s Replay Cache)"]
+            Verifier["🛡️ Zero-Trust Chunk Verifier<br><b>RFC 6962 Merkle Tree</b><br>(In-Memory Check • Zero Disk Poisoning)"]
+            Reputation["⚖️ Dynamic Reputation Engine<br><b>Trust Scoring (0 to 100)</b><br>(Auto-Quarantine & Blacklisting)"]
+        end
+    end
+
+    %% Zone 4: Storage Layer
+    subgraph ZONE4 ["4. Storage & File System"]
+        RAM["🧠 Volatile RAM Buffer<br><b>Pre-Commit Inspection</b><br>(Unverified chunks stay here)"]
+        Disk[("💾 Verified Clean Storage<br><b>Local Disk / Filesystem</b><br>(100% Verified Files Only)")]
+        DB[("📊 SQLite Reputation DB<br><b>WAL Mode Persistent Store</b><br>(Peer Trust History & State)")]
+    end
+
+    %% Connections
+    Phone -->|"1. Connect via Wi-Fi"| Gateway
+    Laptop -->|"1. Connect via Web or TCP"| Gateway
+    Laptop -->|"Raw Socket"| WireFramer
+    
+    Beacon -.->|"Auto-Announce IP & Port"| WireFramer
+    WAN -.->|"Public NAT Mapping"| WireFramer
+
+    Gateway -->|"Internal Bridge"| WireFramer
+    WireFramer -->|"Inbound Envelopes"| Crypto
+    Crypto -->|"Authenticated Payloads"| Verifier
+    
+    Verifier <-->|"Inspect in Memory"| RAM
+    Verifier -->|"Commit Clean Data"| Disk
+    Verifier -->|"Pass/Fail Feedback"| Reputation
+    Reputation -->|"Update Trust Scores"| DB
+
+    %% Styling
+    classDef clientStyle fill:#eff6ff,stroke:#3b82f6,stroke-width:2px,color:#1e3a8a,font-size:12px;
+    classDef netStyle fill:#f5f3ff,stroke:#8b5cf6,stroke-width:2px,color:#5b21b6,font-size:12px;
+    classDef engineStyle fill:#f0fdf4,stroke:#10b981,stroke-width:2px,color:#065f46,font-size:12px;
+    classDef storageStyle fill:#fffbeb,stroke:#f59e0b,stroke-width:2px,color:#92400e,font-size:12px;
+
+    class Phone,Laptop clientStyle;
+    class Beacon,WAN netStyle;
+    class Gateway,WireFramer,Crypto,Verifier,Reputation engineStyle;
+    class RAM,Disk,DB storageStyle;

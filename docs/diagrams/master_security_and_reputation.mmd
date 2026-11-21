@@ -1,0 +1,47 @@
+flowchart TD
+    %% Phase 1: File Preparation & Cryptographic Root
+    subgraph PHASE1 ["Phase 1: File Ingestion & Cryptographic Blueprint"]
+        File["📁 Original File (Any Size)"] --> Split["Split into 64 KB Discrete Chunks<br>(Chunk 0, Chunk 1, Chunk 2...)"]
+        Split --> Merkle["🌳 RFC 6962 Domain-Separated Merkle Tree<br>• Leaf Hash: SHA-256(0x00 || Chunk)<br>• Node Hash: SHA-256(0x01 || Left || Right)<br>• Odd-Node Promotion (Mitigates CVE-2012-2459)"]
+        Merkle --> Root["🔑 Master File Merkle Root (R_F)<br><b>Immutable Global File Identity</b>"]
+    end
+
+    %% Phase 2: Transfer with Signed Non-Repudiation Receipt
+    subgraph PHASE2 ["Phase 2: Transfer & Pre-Commit In-Memory Barrier"]
+        Root -.-> Downloader["📥 Downloader Node"]
+        Seeder["📤 Provider / Seeder Peer"] -->|"Sends: Chunk Data + Merkle Proof + Signed Receipt (&Sigma;_prov)"| RAM["🧠 Volatile In-Memory RAM Barrier<br><b>(Zero-Trust Rule: 0 Bytes Written to Disk Before Verification)</b>"]
+        RAM --> Check{"🛡️ Cryptographic Audit<br>Does Reconstructed Merkle Root<br>match Expected File Root R_F?"}
+    end
+
+    %% Phase 3: The Fork - Honest Delivery vs Corrupt Attack
+    subgraph PHASE3_HONEST ["Outcome A: Clean Chunk Verified"]
+        Check -->|"✅ MATCH (Valid Chunk)"| Commit["💾 Commit Chunk to Disk Storage<br>File reconstructs safely without contamination"]
+        Commit --> Reward["⭐ Peer Trust Score: +2 (Reward)<br>Status: <b>Trusted Seeder (Score: 50 &rarr; 100)</b><br>Higher priority in future swarm transfers"]
+    end
+
+    subgraph PHASE3_CORRUPT ["Outcome B: Tampered / Corrupted Chunk Detected"]
+        Check -->|"❌ MISMATCH (Tampered / Corrupt)"| Purge["🗑️ Immediate RAM Purge<br><b>Zero Disk Contamination</b> (Poison discarded)"]
+        Purge --> Quarantine["🚫 Local Quarantine: Q(Provider, File) = 1<br>Provider blocked from serving this file again"]
+        Quarantine --> Penalty["⚠️ Peer Trust Score: -25 (Penalty)<br>Status: <b>Degraded / Blacklisted (Score &rarr; 0)</b><br>If Score reaches 0 &rarr; Sockets closed permanently"]
+    end
+
+    %% Phase 4: Swarm-Wide Anti-Framing Protection
+    subgraph PHASE4 ["Phase 4: Swarm-Wide Defense & Anti-Framing (Non-Repudiation)"]
+        Quarantine --> Alert["📢 Broadcast Alert to Swarm<br>Includes Bad Chunk + <b>Provider's Signed Receipt (&Sigma;_prov)</b>"]
+        Alert --> Witness{"👀 Swarm Witness Verification<br>Did the accused Provider really sign this receipt?"}
+        
+        Witness -->|"✅ Valid Provider Signature"| GlobalQuarantine["🔒 Swarm-Wide Seeder Ban<br>All peers isolate malicious provider (-25 penalty)"]
+        Witness -->|"❌ Fake / Forged Signature"| SlanderPenalty["🛡️ Anti-Framing Triggered (Slander Protection)<br>Alert rejected; Slandering downloader penalized (-25)"]
+    end
+
+    %% Styling
+    classDef phaseBox fill:#f8fafc,stroke:#64748b,stroke-width:1.5px,color:#0f172a;
+    classDef honestBox fill:#f0fdf4,stroke:#22c55e,stroke-width:2px,color:#14532d;
+    classDef corruptBox fill:#fef2f2,stroke:#ef4444,stroke-width:2px,color:#7f1d1d;
+    classDef warnBox fill:#fffbeb,stroke:#f59e0b,stroke-width:2px,color:#78350f;
+    classDef blueBox fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px,color:#1e3a8a;
+
+    class File,Split,Merkle,Root,Seeder,Downloader,RAM,Check blueBox;
+    class Commit,Reward,GlobalQuarantine honestBox;
+    class Purge,Quarantine,Penalty corruptBox;
+    class Alert,Witness,SlanderPenalty warnBox;
