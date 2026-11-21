@@ -1,59 +1,40 @@
 flowchart LR
-
-    subgraph client ["Participating Swarm Clients"]
-        webClient["Web & Mobile Browser<br>(Cross-Platform Hub)"]
-        desktopPeer["Native Workstation Peer<br>(Python Daemon)"]
+    subgraph Client ["Client Layer"]
+        Web["Web Client<br>(Browser / Mobile)"]
+        CLI["Native Node<br>(Python CLI)"]
     end
 
-    subgraph gateway ["Transport & Gateway Layer"]
-        hubGateway["Swarm Web Gateway<br>(Streamlit Port 8500)"]
-        wireFramer["Length-Prefixed Wire Framer<br>(4-byte Big-Endian, 16MB Cap)"]
+    subgraph Transport ["Transport & Gateway"]
+        Gateway["Web Gateway Bridge<br>(Port 8500)"]
+        Framer["TCP Wire Framer<br>(Length-Prefixed)"]
+        Discovery["UDP Discovery<br>(Port 50050)"]
     end
 
-    subgraph service ["Core Zero-Trust Microservices"]
-        p2pOrchestrator["P2P Node Orchestrator<br>(Asyncio Event Loop)"]
-        cryptoSigner["Crypto Identity & Envelope Signer<br>(2048-bit RSA-PSS, MGF1)"]
-        merkleVerifier["In-Memory Merkle Verifier<br>(RFC 6962 Domain Separated)"]
-        reputationEngine["Dynamic Trust & Quarantine Engine<br>(Score Dynamics 0-100)"]
+    subgraph Core ["Zero-Trust Core Engine"]
+        Orch["P2P Orchestrator<br>(Asyncio Loop)"]
+        Crypto["Crypto Signer<br>(RSA-PSS 2048)"]
+        Merkle["In-Memory Verifier<br>(RFC 6962)"]
+        Rep["Trust Engine<br>(Score: 0 to 100)"]
     end
 
-    subgraph datastore ["Persistent Storage Layer"]
-        sqliteDB[("Peer Reputation Database<br>(SQLite with WAL Mode)")]
-        fileStorage[("Verified Chunk Storage<br>(Zero-Contamination Directory)")]
+    subgraph Storage ["Storage Layer"]
+        RAM["Volatile RAM Buffer<br>(Pre-Commit Barrier)"]
+        Disk[("Verified Storage<br>(Local Disk)")]
+        DB[("Reputation DB<br>(SQLite WAL)")]
     end
 
-    subgraph async ["Asynchronous Event & Security Daemons"]
-        lanBeaconDaemon["UDP Beacon Broadcaster<br>(Port 50050 Presence Beacons)"]
-        replayCache["Anti-Replay Nonce Cache<br>(60s Window, Sliding Filter)"]
-    end
+    Web -->|HTTP / WS| Gateway
+    CLI -->|TCP Socket| Framer
+    Gateway --> Framer
+    Discovery -.->|Peer Discovery| Orch
+    Framer -->|Framed Packets| Orch
+    Orch -->|Authenticate| Crypto
+    Orch -->|Verify Chunks| Merkle
+    Merkle -->|Pre-Commit Check| RAM
+    Merkle -->|Commit Clean Data| Disk
+    Merkle -->|Verification Outcome| Rep
+    Rep -->|Update Scores| DB
 
-    subgraph external ["External Discovery Infrastructure"]
-        stunReflector["Public STUN Reflectors<br>(RFC 5389 Port 19302)"]
-        bootstrapRendezvous["HTTP Rendezvous Tracker<br>(WAN Swarm Registry)"]
-    end
-
-    %% Client to Gateway
-    webClient <-->|"WebSocket / HTTP"| hubGateway
-    desktopPeer <-->|"Raw TCP Socket"| wireFramer
-    hubGateway -->|"Local Socket Dispatch"| wireFramer
-
-    %% Gateway to Service
-    wireFramer -->|"Decoded Canonical Envelope"| p2pOrchestrator
-
-    %% Service to Service
-    p2pOrchestrator -->|"Validate Sender & Sign"| cryptoSigner
-    p2pOrchestrator -->|"Verify Chunk Audit Path"| merkleVerifier
-    p2pOrchestrator -->|"Update Trust & Quarantine"| reputationEngine
-    merkleVerifier -->|"Pre-Commit Decision"| reputationEngine
-
-    %% Service to Datastore
-    reputationEngine -->|"Record Behavioral Score"| sqliteDB
-    merkleVerifier -->|"Commit Clean Chunk Only"| fileStorage
-
-    %% Service to Async Daemons
-    p2pOrchestrator -.->|"Check & Record Nonce"| replayCache
-    p2pOrchestrator -.->|"Transmit & Receive Beacons"| lanBeaconDaemon
-
-    %% Service to External
-    p2pOrchestrator -.->|"Resolve Public Reflexive IP"| stunReflector
-    p2pOrchestrator -.->|"Announce Swarm Membership"| bootstrapRendezvous
+    %% Clean Black and White Styling
+    classDef bw fill:#ffffff,stroke:#000000,stroke-width:1.5px,color:#000000;
+    class Web,CLI,Gateway,Framer,Discovery,Orch,Crypto,Merkle,Rep,RAM,Disk,DB bw;

@@ -1,9 +1,0 @@
-flowchart TD
-    ChunkIn["Inbound Chunk C_k + Proof Pi_k + Signed Receipt Sigma_prov"] --> MemoryBuffer["Volatile RAM Buffer (Zero-Trust Pre-Commit Barrier)"]
-    MemoryBuffer --> MerkleCheck{"RFC 6962 Merkle Check: Reconstructed Root == R_F?"}
-    MerkleCheck -->|"VALID (Clean Chunk)"| DiskCommit["Commit to Secondary Disk Storage | Trust Reward: +2"]
-    MerkleCheck -->|"CORRUPT (Poisoned Chunk)"| DropMemory["Purge RAM Buffer (Zero Disk Contamination) | File Quarantine: Q(P, R_F)=1 | Trust Penalty: -25"]
-    DropMemory --> BroadcastAlert["Broadcast Alert with Signed Provider Receipt Sigma_prov"]
-    BroadcastAlert --> WitnessCheck{"Witness Verify Receipt Signature?"}
-    WitnessCheck -->|"Valid Signature"| SwarmQuarantine["Swarm-Wide Provider Isolation"]
-    WitnessCheck -->|"Invalid Signature"| RejectFraming["Reject Slander & Penalize Reporting Peer"]
