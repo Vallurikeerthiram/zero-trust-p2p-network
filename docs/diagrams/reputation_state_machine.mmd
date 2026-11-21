@@ -1,0 +1,41 @@
+stateDiagram-v2
+    [*] --> NewPeer: Fresh Device ID Generated (ID = SHA-256(PEM(K_pub)))
+
+    NewPeer --> Baseline: Initial Trust Initialization (T_0 = 50)
+
+    state Baseline {
+        [*] --> ActiveStandard
+        ActiveStandard: Standard Swarm Participant
+        ActiveStandard: Moderate Download Rate Privileges
+    }
+
+    Baseline --> Trusted: Valid Chunk Delivered (+2 Reward)
+    Trusted --> Trusted: Continuous Honest Serving (Score capped at 100)
+
+    state Trusted {
+        [*] --> HighPriority
+        HighPriority: High Trust Rank (T in [52, 100])
+        HighPriority: Preferred Provider in Swarm Rotation
+    }
+
+    Trusted --> Degraded: Single Corrupted Chunk Delivered (-25 Penalty)
+    Baseline --> Degraded: Single Corrupted Chunk Delivered (-25 Penalty)
+
+    state Degraded {
+        [*] --> TargetedQuarantine
+        TargetedQuarantine: File-Specific Quarantine Q(P, R_F) = 1
+        TargetedQuarantine: Low Trust Rank (T in [1, 49])
+        TargetedQuarantine: Excluded from active download sets for file F
+    }
+
+    Degraded --> Trusted: Serves Clean Chunks for Other Files (+2 per chunk)
+    Degraded --> Blacklisted: Repeated Corruption / Trust Score Reaches 0
+
+    state Blacklisted {
+        [*] --> PermanentDrop
+        PermanentDrop: Trust Score T = 0
+        PermanentDrop: Transport Socket Dropped on Connection
+        PermanentDrop: All Swarm Handshakes Immediately Terminated
+    }
+
+    Blacklisted --> [*]: Irreversible Ban (Cryptographic Identity Bound)

@@ -1,0 +1,59 @@
+flowchart LR
+
+    subgraph client ["Participating Swarm Clients"]
+        webClient["Web & Mobile Browser<br>(Cross-Platform Hub)"]
+        desktopPeer["Native Workstation Peer<br>(Python Daemon)"]
+    end
+
+    subgraph gateway ["Transport & Gateway Layer"]
+        hubGateway["Swarm Web Gateway<br>(Streamlit Port 8500)"]
+        wireFramer["Length-Prefixed Wire Framer<br>(4-byte Big-Endian, 16MB Cap)"]
+    end
+
+    subgraph service ["Core Zero-Trust Microservices"]
+        p2pOrchestrator["P2P Node Orchestrator<br>(Asyncio Event Loop)"]
+        cryptoSigner["Crypto Identity & Envelope Signer<br>(2048-bit RSA-PSS, MGF1)"]
+        merkleVerifier["In-Memory Merkle Verifier<br>(RFC 6962 Domain Separated)"]
+        reputationEngine["Dynamic Trust & Quarantine Engine<br>(Score Dynamics 0-100)"]
+    end
+
+    subgraph datastore ["Persistent Storage Layer"]
+        sqliteDB[("Peer Reputation Database<br>(SQLite with WAL Mode)")]
+        fileStorage[("Verified Chunk Storage<br>(Zero-Contamination Directory)")]
+    end
+
+    subgraph async ["Asynchronous Event & Security Daemons"]
+        lanBeaconDaemon["UDP Beacon Broadcaster<br>(Port 50050 Presence Beacons)"]
+        replayCache["Anti-Replay Nonce Cache<br>(60s Window, Sliding Filter)"]
+    end
+
+    subgraph external ["External Discovery Infrastructure"]
+        stunReflector["Public STUN Reflectors<br>(RFC 5389 Port 19302)"]
+        bootstrapRendezvous["HTTP Rendezvous Tracker<br>(WAN Swarm Registry)"]
+    end
+
+    %% Client to Gateway
+    webClient <-->|"WebSocket / HTTP"| hubGateway
+    desktopPeer <-->|"Raw TCP Socket"| wireFramer
+    hubGateway -->|"Local Socket Dispatch"| wireFramer
+
+    %% Gateway to Service
+    wireFramer -->|"Decoded Canonical Envelope"| p2pOrchestrator
+
+    %% Service to Service
+    p2pOrchestrator -->|"Validate Sender & Sign"| cryptoSigner
+    p2pOrchestrator -->|"Verify Chunk Audit Path"| merkleVerifier
+    p2pOrchestrator -->|"Update Trust & Quarantine"| reputationEngine
+    merkleVerifier -->|"Pre-Commit Decision"| reputationEngine
+
+    %% Service to Datastore
+    reputationEngine -->|"Record Behavioral Score"| sqliteDB
+    merkleVerifier -->|"Commit Clean Chunk Only"| fileStorage
+
+    %% Service to Async Daemons
+    p2pOrchestrator -.->|"Check & Record Nonce"| replayCache
+    p2pOrchestrator -.->|"Transmit & Receive Beacons"| lanBeaconDaemon
+
+    %% Service to External
+    p2pOrchestrator -.->|"Resolve Public Reflexive IP"| stunReflector
+    p2pOrchestrator -.->|"Announce Swarm Membership"| bootstrapRendezvous
