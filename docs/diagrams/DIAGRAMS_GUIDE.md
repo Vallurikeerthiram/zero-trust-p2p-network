@@ -1,34 +1,77 @@
-# Architecture & System Diagrams for Zero-Trust P2P Network
+# Space-Efficient Diagrams for IEEE Papers & Slides
 
-This directory contains the production-grade architectural and protocol diagrams designed specifically for **academic research papers (IEEE format)** and **conference / project slide presentations**.
+In IEEE two-column papers (e.g. 6-page strict limit), **horizontal space is constrained to a single column (~3.5 inches / 88 mm)**. Wide 6-column horizontal diagrams consume excessive page height if stretched or become illegible when shrunk.
 
----
+To solve this, two **compact, space-optimized diagrams** have been designed specifically to fit within a single column (`\columnwidth`) or a clean slide layout:
 
-## Diagram Index
-
-1. **System Architecture Diagram (`system_architecture.mmd`):**
-   - **Type:** Software Infrastructure Architecture Flowchart (Left-to-Right).
-   - **Purpose:** Full end-to-end view showing clients, transport framer, core P2P microservices, SQLite reputation datastore, zero-contamination chunk storage, async UDP/nonce daemons, and external STUN/Bootstrap infrastructure.
-   - **Best For:** Paper Section III (*System Architecture*) and Overview presentation slide.
-
-2. **RFC 6962 Domain-Separated Merkle Tree (`merkle_verification.mmd`):**
-   - **Type:** Hierarchical Tree Flowchart.
-   - **Purpose:** Visualizes discrete 64 KB chunks, `0x00` leaf domain separation, `0x01` interior node domain separation, and direct odd-node promotion preventing second pre-image attacks (CVE-2012-2459 mitigation).
-   - **Best For:** Paper Section III-B (*Merkle Verification*) and Cryptographic Design slide.
-
-3. **In-Memory Pre-Commit & Anti-Framing Protocol (`protocol_sequence.mmd`):**
-   - **Type:** UML Sequence Diagram with Autonumbering.
-   - **Purpose:** Step-by-step transaction flow between Downloader, Provider, and Swarm Witnesses showing in-memory pre-commit verification barrier, zero disk contamination, and signed receipt ($\Sigma_{prov}$) verification against malicious slander/framing.
-   - **Best For:** Paper Section III-C (*Reputation & Anti-Framing*) and Protocol Walkthrough slide.
-
-4. **Dynamic Peer Reputation & Quarantine State Machine (`reputation_state_machine.mmd`):**
-   - **Type:** UML State Diagram (`stateDiagram-v2`).
-   - **Purpose:** Illustrates state transitions across Baseline ($T_0=50$), Trusted ($[52, 100]$), Degraded/Quarantined ($[1, 49]$), and permanent Blacklist ($T=0$) with socket termination.
-   - **Best For:** Paper Section III-C (*Reputation Engine*) and Security Mitigation slide.
+1. **Compact 3-Tier System Architecture (`compact_architecture.mmd`):**
+   - **FigJam Board:** [Open Compact Architecture in FigJam](https://www.figma.com/online-whiteboard/create-diagram/3bc58890-977e-49f7-abd0-df57e40e9398?utm_source=other&utm_content=edit_in_figjam&oai_id=&request_id=c89c8bcc-4765-453e-9df0-ee3c8eb5bc12)
+   - **Height in LaTeX:** Occupies only ~2.2 inches of vertical column space.
+2. **Zero-Trust Chunk & Anti-Framing Pipeline (`compact_pipeline.mmd`):**
+   - **FigJam Board:** [Open Compact Pipeline in FigJam](https://www.figma.com/online-whiteboard/create-diagram/1be75884-58c5-4de3-a6f5-871a848c8adb?utm_source=other&utm_content=edit_in_figjam&oai_id=&request_id=f6d118b4-bc7e-4f63-b2e4-e01bbe272370)
+   - **Height in LaTeX:** Occupies only ~2.0 inches of vertical column space.
 
 ---
 
-## 1. System Architecture Diagram
+## Diagram Index & FigJam Links
+
+| Diagram Name | Primary Focus | Best Use Case | Editable FigJam Link |
+| :--- | :--- | :--- | :--- |
+| **Compact 3-Tier Architecture** | Client, Core Security, Storage & Discovery | Paper Sec. III (Single Column) | [View FigJam](https://www.figma.com/online-whiteboard/create-diagram/3bc58890-977e-49f7-abd0-df57e40e9398?utm_source=other&utm_content=edit_in_figjam&oai_id=&request_id=c89c8bcc-4765-453e-9df0-ee3c8eb5bc12) |
+| **Zero-Trust Chunk Pipeline** | In-Memory Barrier & Anti-Framing | Paper Sec. III-B / III-C | [View FigJam](https://www.figma.com/online-whiteboard/create-diagram/1be75884-58c5-4de3-a6f5-871a848c8adb?utm_source=other&utm_content=edit_in_figjam&oai_id=&request_id=f6d118b4-bc7e-4f63-b2e4-e01bbe272370) |
+| **Full Horizontal Architecture** | Sprawling Microservices & Daemons | Full-width Slide / Poster | [View FigJam](https://www.figma.com/online-whiteboard/create-diagram/cd80a95f-cde0-4172-b08b-3b9f134b80c2?utm_source=other&utm_content=edit_in_figjam&oai_id=&request_id=820f4e8e-c6c2-4aaf-b0c9-c1ef39308a3a&architecture=true) |
+| **RFC 6962 Merkle Tree** | Odd-Node Promotion (CVE-2012-2459) | Paper Sec. III-B | [View FigJam](https://www.figma.com/online-whiteboard/create-diagram/7d413152-4258-491e-a58b-802a03fbbe50?utm_source=other&utm_content=edit_in_figjam&oai_id=&request_id=f61199b5-16b5-4638-ae4f-8f7cc9dcd62b) |
+| **Protocol Sequence Diagram** | Transaction Steps & Signed Receipts | Paper Sec. III-A / III-C | [View FigJam](https://www.figma.com/online-whiteboard/create-diagram/cb0019d2-eb38-43e2-a593-676dd20a3c37?utm_source=other&utm_content=edit_in_figjam&oai_id=&request_id=dc02f79e-0c0c-4cec-9595-e83e7c98dbb0) |
+| **Reputation State Machine** | Trust Transitions & Socket Drops | Presentation Slide | [View FigJam](https://www.figma.com/online-whiteboard/create-diagram/10b45833-fc6c-4bf9-8b2d-6b98144b1758?utm_source=other&utm_content=edit_in_figjam&oai_id=&request_id=bee914a4-5180-4556-a18e-24b5f25e0dea) |
+
+---
+
+## 1. Compact 3-Tier Architecture Diagram (Single-Column)
+
+```mermaid
+flowchart TD
+    subgraph L1 ["1. Client & Access Layer"]
+        WebHub["Web & Mobile Hub (Streamlit :8500)"]
+        NativePeer["Native Workstation Node (:8000)"]
+    end
+
+    subgraph L2 ["2. Zero-Trust Security & Processing Engine"]
+        WireFramer["Wire Protocol (4B Length Prefix, 16MB DoS Cap)"]
+        MerkleEngine["RFC 6962 In-Memory Merkle Verifier (64KB Chunks)"]
+        CryptoAuth["2048-bit RSA-PSS Auth & 60s Sliding Nonce Filter"]
+        ReputationEngine["Dynamic Trust Engine (0-100 Scoring & Targeted Quarantine)"]
+    end
+
+    subgraph L3 ["3. Storage & Hybrid Discovery"]
+        LocalStorage[("Zero-Contamination Storage & SQLite DB")]
+        DiscoveryNet["Dual Discovery: UDP 50050 Beacon + RFC 5389 STUN / Tracker"]
+    end
+
+    WebHub -->|"HTTP / WS"| WireFramer
+    NativePeer -->|"Raw TCP"| WireFramer
+    WireFramer --> MerkleEngine
+    WireFramer --> CryptoAuth
+    MerkleEngine -->|"Pre-Commit Pass/Fail"| ReputationEngine
+    ReputationEngine -->|"Update Trust"| LocalStorage
+    MerkleEngine -->|"Persist Clean Chunks"| LocalStorage
+    CryptoAuth -.->|"Signed Presence"| DiscoveryNet
+```
+
+---
+
+## 2. Zero-Trust Pipeline & Anti-Framing Workflow (Single-Column)
+
+```mermaid
+flowchart TD
+    ChunkIn["Inbound Chunk C_k + Proof Pi_k + Signed Receipt Sigma_prov"] --> MemoryBuffer["Volatile RAM Buffer (Zero-Trust Pre-Commit Barrier)"]
+    MemoryBuffer --> MerkleCheck{"RFC 6962 Merkle Check: Reconstructed Root == R_F?"}
+    MerkleCheck -->|"VALID (Clean Chunk)"| DiskCommit["Commit to Secondary Disk Storage | Trust Reward: +2"]
+    MerkleCheck -->|"CORRUPT (Poisoned Chunk)"| DropMemory["Purge RAM Buffer (Zero Disk Contamination) | File Quarantine: Q(P, R_F)=1 | Trust Penalty: -25"]
+    DropMemory --> BroadcastAlert["Broadcast Alert with Signed Provider Receipt Sigma_prov"]
+    BroadcastAlert --> WitnessCheck{"Witness Verify Receipt Signature?"}
+    WitnessCheck -->|"Valid Signature"| SwarmQuarantine["Swarm-Wide Provider Isolation"]
+    WitnessCheck -->|"Invalid Signature"| RejectFraming["Reject Slander & Penalize Reporting Peer"]
+```
 
 ```mermaid
 flowchart LR
